@@ -10,7 +10,10 @@ As of the Phase 1 build, the extension connects directly to GitHub, surfaces r
 - Authenticate with GitHub via device code to load repositories you own or collaborate on.
 - Browse open issues, search titles, and filter by label, assignee, or milestone inside VS Code.
 - Track readiness with the weighted checklist focused on problem clarity, impact, dependencies, safeguards, and validation (future phases enrich this with AI scoring).
+- See the most recent assessment’s composite score, dimension breakdowns, summary, and recommendations directly inside the panel, with quick links back to the issue or GitHub comment.
+- Run **Issue Triage: Assess Selected Issue** to generate an AI-assisted readiness assessment using OpenRouter, with results stored locally and (optionally) posted back to the GitHub issue.
 - Jump from the list to the GitHub issue in your browser for deeper inspection.
+- Monitor whether guarded automation launch is enabled via the panel badge (controlled through `issuetriage.automation.launchEnabled`).
 
 ## Getting Started
 
@@ -33,20 +36,42 @@ IssueTriage uses GitHub’s device flow to authenticate. Create a GitHub OAuth A
 	- Or set VS Code settings (`Settings → Extensions → IssueTriage`) for `issuetriage.github.oauthClientId` and `issuetriage.github.oauthClientSecret`.
 5. Reload VS Code after updating environment variables or settings (`Developer: Reload Window`).
 
-### 2. Open the Issue Triage panel
+### 2. Configure OpenRouter (once per developer)
+
+IssueTriage uses OpenRouter to power AI-driven assessments.
+
+1. Sign up at [OpenRouter](https://openrouter.ai/) and create an API key.
+2. Provide the key via one of the following:
+	- Add `ISSUETRIAGE_OPENROUTER_API_KEY=your_api_key` to `.env` (preferred for local development).
+	- Or set **Settings → Extensions → IssueTriage → Assessment: Api Key**.
+3. Adjust model selections if desired:
+			- `issuetriage.assessment.preferredModel` (default `openai/gpt-5-mini`).
+	- Toggle premium mode with `issuetriage.assessment.usePremiumModel` to use `issuetriage.assessment.premiumModel`.
+4. Reload VS Code after changing environment variables.
+
+> **Automation Launch Guard**: Keep `issuetriage.automation.launchEnabled` at its default `false` while automation workflows are still in development. Enable it only when the downstream automation adapter is configured.
+
+### 3. Open the Issue Triage panel
 
 1. Press `F1` or `Ctrl+Shift+P` to open the command palette.
 2. Run **Issue Triage: Open Panel**.
 3. Use **Connect GitHub** if prompted to complete the device-code flow (copy the displayed code, follow the browser prompt, and authorize the app).
 
-### 3. Explore your backlog
+### 4. Explore your backlog
 
 1. Pick a repository from the dropdown (default respects `issuetriage.github.defaultRepository` if configured).
 2. Search titles or apply label/assignee/milestone filters to focus on candidates.
-3. Click an issue card to open it on GitHub.
+3. Click an issue card to load its latest assessment in the panel (double-click to open on GitHub).
 4. Use **Refresh** to pull the latest data or **Issue Triage: Refresh Issues** from the command palette.
 
-### 4. Manage sessions
+### 5. Run AI assessments
+
+1. Filter to the issue you want to evaluate.
+2. Run **Issue Triage: Assess Selected Issue** and pick the issue from the quick pick list.
+3. The extension will call OpenRouter, write the result to a local SQLite database, and (if `issuetriage.assessment.publishComments` is true) upsert a single comment on the GitHub issue tagged with `<!-- IssueTriage Assessment -->`.
+4. Composite and dimension scores, a summary, and recommendations now appear in both the panel and the optional GitHub comment for the team to review.
+
+### 6. Manage sessions
 
 - Run **Issue Triage: Sign Out** to revoke local tokens (secrets are stored via VS Code SecretStorage).
 - Re-run **Connect GitHub** any time you rotate OAuth credentials or need to change accounts.
@@ -62,6 +87,7 @@ IssueTriage uses GitHub’s device flow to authenticate. Create a GitHub OAuth A
 ### 0.0.1
 
 - Initial release with GitHub integration (device-code auth, repo + issue browsing, filterable backlog) and the readiness checklist scaffold.
+- Added OpenRouter-powered assessments with local SQLite history and single-comment GitHub publishing.
 
 ---
 

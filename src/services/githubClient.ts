@@ -28,6 +28,18 @@ type IssueResponseItem = {
 	pull_request?: unknown;
 };
 
+type IssueDetailResponse = IssueResponseItem & {
+	body?: string | null;
+	user?: { login?: string | null } | null;
+	created_at?: string;
+};
+
+type CommentResponse = {
+	id: number;
+	body: string;
+	user?: { login?: string | null } | null;
+};
+
 export interface RepositorySummary {
 	id: number;
 	name: string;
@@ -49,6 +61,13 @@ export interface IssueSummary {
 	assignees: string[];
 	milestone?: string;
 	updatedAt: string;
+}
+
+export interface IssueDetail extends IssueSummary {
+	repository: string;
+	body: string;
+	author: string;
+	createdAt?: string;
 }
 
 export interface IssueFilters {
@@ -121,10 +140,7 @@ export class GitHubClient {
 
 		const token = await this.requireToken();
 		const client = await this.createClient(token);
-		const [owner, repo] = fullName.split('/');
-		if (!owner || !repo) {
-			throw new Error(`Invalid repository name: ${fullName}`);
-		}
+		const { owner, repo } = this.parseRepository(fullName);
 
 		try {
 			const params: Record<string, string | number | undefined> = {
@@ -162,6 +178,73 @@ export class GitHubClient {
 		}
 	}
 
+	public async getIssueDetails(fullName: string, issueNumber: number): Promise<IssueDetail> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			const response = await client.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
+				owner,
+				repo,
+				issue_number: issueNumber
+			});
+			const data = response.data as IssueDetailResponse;
+			return {
+				repository: fullName,
+				number: data.number,
+				title: data.title,
+				url: data.html_url,
+				labels: data.labels?.map((label: string | { name?: string }) => (typeof label === 'string' ? label : label?.name ?? '')).filter(Boolean) ?? [],
+				assignees: data.assignees?.map((assignee: { login?: string } | null) => assignee?.login ?? '').filter(Boolean) ?? [],
+				milestone: data.milestone?.title,
+				updatedAt: data.updated_at,
+				createdAt: data.created_at,
+				body: (data.body ?? '').trim(),
+				author: data.user?.login ?? 'unknown'
+			};
+		} catch (error) {
+			this.handleError('github.issue.detail.failed', error);
+			throw error;
+		}
+	}
+
+	public async upsertIssueComment(fullName: string, issueNumber: number, body: string, commentId?: number): Promise<number | undefined> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		if (commentId) {
+			try {
+				await client.request('PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}', {
+					owner,
+					repo,
+					comment_id: commentId,
+					body
+				});
+				return commentId;
+			} catch (error) {
+				const status = (error as { status?: number })?.status;
+				if (status && status !== 404) {
+					this.handleError('github.issue.comment.updateFailed', error);
+					throw error;
+				}
+			}
+		}
+
+		try {
+			const response = await client.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+				owner,
+				repo,
+				issue_number: issueNumber,
+				body
+			});
+			const data = response.data as CommentResponse;
+			return data.id;
+		} catch (error) {
+			this.handleError('github.issue.comment.createFailed', error);
+			throw error;
+		}
+	}
+
 	public clearCaches(): void {
 		this.repoCache.clear();
 		this.issueCache.clear();
@@ -192,6 +275,14 @@ export class GitHubClient {
 			value,
 			expiresAt: Date.now() + CACHE_TTL_MS
 		});
+	}
+
+	private parseRepository(fullName: string): { owner: string; repo: string } {
+		const [owner, repo] = fullName.split('/');
+		if (!owner || !repo) {
+			throw new Error(`Invalid repository name: ${fullName}`);
+		}
+		return { owner, repo };
 	}
 
 	private async createClient(token: string): Promise<any> {

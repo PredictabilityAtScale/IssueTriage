@@ -23,6 +23,7 @@ interface IssueManagerState {
 	filters: FilterState;
 	lastUpdated?: string;
 	session?: GitHubSessionMetadata;
+	automationLaunchEnabled: boolean;
 }
 
 const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
@@ -39,7 +40,8 @@ export class IssueManager implements vscode.Disposable {
 			assignees: [],
 			milestones: []
 		},
-		filters: {}
+		filters: {},
+		automationLaunchEnabled: false
 	};
 	private allIssues: IssueSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
@@ -178,7 +180,8 @@ export class IssueManager implements vscode.Disposable {
 				assignees: [],
 				milestones: []
 			},
-			filters: {}
+			filters: {},
+			automationLaunchEnabled: this.readAutomationFlag()
 		};
 		this.allIssues = [];
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, undefined);
@@ -256,7 +259,12 @@ export class IssueManager implements vscode.Disposable {
 	}
 
 	private emitState(): void {
+		this.state.automationLaunchEnabled = this.readAutomationFlag();
 		this.emitter.fire({ ...this.state, issues: [...this.state.issues] });
+	}
+
+	private readAutomationFlag(): boolean {
+		return this.settings.get<boolean>('automation.launchEnabled', false) ?? false;
 	}
 
 	private handleUserFacingError(contextMessage: string, error: unknown): void {

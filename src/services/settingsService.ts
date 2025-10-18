@@ -19,6 +19,15 @@ export class SettingsService {
 		await this.configuration.update(key, value, target);
 	}
 
+	public getWithEnvFallback(key: string, envVar: string): string | undefined {
+		const envValue = process.env[envVar];
+		if (envValue && envValue.trim().length > 0) {
+			return envValue.trim();
+		}
+		const value = this.get<string>(key);
+		return value && value.trim().length > 0 ? value.trim() : undefined;
+	}
+
 	private get configuration(): vscode.WorkspaceConfiguration {
 		return vscode.workspace.getConfiguration(this.section);
 	}
