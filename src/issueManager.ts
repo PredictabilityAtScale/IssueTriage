@@ -5,6 +5,28 @@ import { SettingsService } from './services/settingsService';
 import { StateService } from './services/stateService';
 import { TelemetryService } from './services/telemetryService';
 
+interface GitExtensionApiWrapper {
+	getAPI(version: number): GitApi;
+}
+
+interface GitApi {
+	repositories: GitRepository[];
+	getRepository?(uri: vscode.Uri): GitRepository | undefined;
+}
+
+interface GitRepository {
+	rootUri: vscode.Uri;
+	state: {
+		remotes: GitRemote[];
+	};
+}
+
+interface GitRemote {
+	name?: string;
+	fetchUrl?: string;
+	pushUrl?: string;
+}
+
 export interface FilterState extends IssueFilters {
 	search?: string;
 }
@@ -52,9 +74,10 @@ export class IssueManager implements vscode.Disposable {
 		private readonly settings: SettingsService,
 		private readonly stateService: StateService,
 		private readonly telemetry: TelemetryService
-	) {}
+		) {}
 
-	public readonly onDidChangeState = this.emitter.event;
+		public readonly onDidChangeState = this.emitter.event;
+		private workspaceRepositorySlug?: string;
 
 	public async initialize(): Promise<void> {
 		try {
@@ -66,15 +89,21 @@ export class IssueManager implements vscode.Disposable {
 			const storedFilters = this.stateService.getWorkspace<FilterState>(WORKSPACE_FILTER_KEY, {});
 			if (storedRepository) {
 				this.state.selectedRepository = storedRepository;
+				this.workspaceRepositorySlug = this.normalizeRepositorySlug(storedRepository.fullName);
 			}
 			if (storedFilters) {
 				this.state.filters = storedFilters;
 			}
+			if (!storedRepository) {
+				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
+			}
 			this.emitState();
 
-			if (session && storedRepository) {
+			if (session) {
 				await this.refreshRepositories();
-				await this.refreshIssues();
+				if (this.state.selectedRepository) {
+					await this.refreshIssues(true);
+				}
 			}
 		} catch (error) {
 			this.setError(error instanceof Error ? error.message : 'Failed to initialize Issue Manager.');
@@ -92,7 +121,9 @@ export class IssueManager implements vscode.Disposable {
 				this.state.session = await this.auth.getSessionMetadata();
 			}
 			await this.refreshRepositories(true);
-			await this.promptForRepository();
+			if (!this.state.selectedRepository) {
+				await this.promptForRepository();
+			}
 		} catch (error) {
 			this.handleUserFacingError('Failed to connect to GitHub.', error);
 		}
@@ -123,6 +154,9 @@ export class IssueManager implements vscode.Disposable {
 	public async refreshRepositories(forceRefresh = false): Promise<void> {
 		this.setLoading(true);
 		try {
+			if (!this.workspaceRepositorySlug) {
+				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
+			}
 			const repositories = await this.github.listRepositories(forceRefresh);
 			this.state.repositories = repositories;
 
@@ -154,6 +188,7 @@ export class IssueManager implements vscode.Disposable {
 			throw new Error(`Repository ${fullName} not found in cache.`);
 		}
 		this.state.selectedRepository = repository;
+		this.workspaceRepositorySlug = this.normalizeRepositorySlug(repository.fullName);
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, repository);
 		this.emitState();
 		if (refresh) {
@@ -212,9 +247,19 @@ export class IssueManager implements vscode.Disposable {
 	}
 
 	private getDefaultRepository(repositories: RepositorySummary[]): RepositorySummary | undefined {
+		if (this.workspaceRepositorySlug) {
+			const workspaceMatch = this.findRepositoryBySlug(repositories, this.workspaceRepositorySlug);
+			if (workspaceMatch) {
+				return workspaceMatch;
+			}
+		}
 		const defaultSlug = this.settings.get<string>('github.defaultRepository');
-		if (defaultSlug) {
-			return repositories.find(repo => repo.fullName.toLowerCase() === defaultSlug.toLowerCase());
+		const normalizedDefault = this.normalizeRepositorySlug(defaultSlug ?? undefined);
+		if (normalizedDefault) {
+			const configuredMatch = this.findRepositoryBySlug(repositories, normalizedDefault);
+			if (configuredMatch) {
+				return configuredMatch;
+			}
 		}
 		return repositories[0];
 	}
@@ -272,5 +317,111 @@ export class IssueManager implements vscode.Disposable {
 		this.telemetry.trackEvent('issueManager.error', { message, context: contextMessage });
 		vscode.window.showErrorMessage(`${contextMessage} ${message}`);
 		this.setError(`${contextMessage} ${message}`);
+	}
+
+	private async detectWorkspaceRepositorySlug(): Promise<string | undefined> {
+		try {
+			const folders = vscode.workspace.workspaceFolders;
+			if (!folders || folders.length === 0) {
+				return undefined;
+			}
+			const gitExtension = vscode.extensions.getExtension<GitExtensionApiWrapper>('vscode.git');
+			if (!gitExtension) {
+				return undefined;
+			}
+			const gitExports: GitExtensionApiWrapper | undefined = gitExtension.isActive
+				? gitExtension.exports
+				: await gitExtension.activate();
+			const api = gitExports?.getAPI?.(1);
+			if (!api) {
+				return undefined;
+			}
+			for (const folder of folders) {
+				const repository = api.getRepository?.(folder.uri) ?? api.repositories.find(repo =>
+					folder.uri.fsPath.startsWith(repo.rootUri.fsPath) || repo.rootUri.fsPath.startsWith(folder.uri.fsPath)
+				);
+				if (!repository) {
+					continue;
+				}
+				const slug = this.pickRemoteSlug(repository.state.remotes);
+				if (slug) {
+					return this.normalizeRepositorySlug(slug);
+				}
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.workspaceRepoDetectError', { message });
+		}
+		return undefined;
+	}
+
+	private pickRemoteSlug(remotes: GitRemote[]): string | undefined {
+		if (!remotes || remotes.length === 0) {
+			return undefined;
+		}
+		const candidates = [...remotes];
+		const originIndex = candidates.findIndex(remote => remote.name === 'origin');
+		if (originIndex > 0) {
+			const [origin] = candidates.splice(originIndex, 1);
+			candidates.unshift(origin);
+		}
+		for (const remote of candidates) {
+			const slug = this.extractSlugFromRemoteUrl(remote.fetchUrl) ?? this.extractSlugFromRemoteUrl(remote.pushUrl);
+			if (slug) {
+				return slug;
+			}
+		}
+		return undefined;
+	}
+
+	private extractSlugFromRemoteUrl(url?: string): string | undefined {
+		if (!url) {
+			return undefined;
+		}
+		let normalized = url.trim();
+		if (!normalized) {
+			return undefined;
+		}
+		normalized = normalized.replace(/\.git$/i, '');
+		normalized = normalized.replace(/\/+$/u, '');
+		const hostIndex = normalized.toLowerCase().indexOf('github.com');
+		if (hostIndex === -1) {
+			return undefined;
+		}
+		const hostTerminator = hostIndex + 'github.com'.length;
+		let pathPart = normalized.slice(hostTerminator);
+		pathPart = pathPart.replace(/^[:/]+/, '');
+		if (!pathPart) {
+			return undefined;
+		}
+		const segments = pathPart.split('/');
+		if (segments.length < 2) {
+			return undefined;
+		}
+		const owner = segments[0];
+		const repo = segments[1];
+		if (!owner || !repo) {
+			return undefined;
+		}
+		return `${owner}/${repo}`;
+	}
+
+	private findRepositoryBySlug(repositories: RepositorySummary[], slug: string | undefined): RepositorySummary | undefined {
+		const normalized = this.normalizeRepositorySlug(slug);
+		if (!normalized) {
+			return undefined;
+		}
+		return repositories.find(repo => this.normalizeRepositorySlug(repo.fullName) === normalized);
+	}
+
+	private normalizeRepositorySlug(slug: string | undefined): string | undefined {
+		if (!slug) {
+			return undefined;
+		}
+		const trimmed = slug.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		return trimmed.toLowerCase();
 	}
 }
