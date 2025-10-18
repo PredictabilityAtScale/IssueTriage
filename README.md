@@ -2,29 +2,74 @@
 
 IssueTriage adds an interactive triage dashboard to Visual Studio Code so product and engineering teams can quickly assess how ready an issue is for implementation.
 
+As of the Phase 1 build, the extension connects directly to GitHub, surfaces repository backlogs, and lets you filter issues before moving into the assessment workflow.
+
 ## Features
 
 - Launch the **Issue Triage** panel from the command palette (`Issue Triage: Open Panel`).
-- Track readiness with a weighted checklist focused on problem clarity, impact, dependencies, safeguards, and validation.
-- See the calculated readiness score, recommended next steps, and helpful reminders for risk hot-spots.
-- Reset the checklist at any time to evaluate another issue.
+- Authenticate with GitHub via device code to load repositories you own or collaborate on.
+- Browse open issues, search titles, and filter by label, assignee, or milestone inside VS Code.
+- Track readiness with the weighted checklist focused on problem clarity, impact, dependencies, safeguards, and validation (future phases enrich this with AI scoring).
+- Jump from the list to the GitHub issue in your browser for deeper inspection.
 
 ## Getting Started
 
+### 1. Configure GitHub OAuth (once per workspace)
+
+IssueTriage uses GitHub’s device flow to authenticate. Create a GitHub OAuth App and provide its credentials to the extension:
+
+1. Navigate to **GitHub → Settings → Developer settings → OAuth Apps** (org owners can create the app at the org level).
+2. Select **New OAuth App** and supply:
+	- **Application name**: `IssueTriage (Local)` (or similar)
+	- **Homepage URL**: `https://issuetriage.local`
+	- **Authorization callback URL**: `https://issuetriage.local/auth/callback`
+3. After creating the app copy the **Client ID** and generate a **Client Secret**.
+4. Provide the credentials to IssueTriage using one of the options below:
+	- Create a `.env` file in the repository root (already `.gitignore`d) with:
+	  ```bash
+	  ISSUETRIAGE_GITHUB_CLIENT_ID=your_client_id
+	  ISSUETRIAGE_GITHUB_CLIENT_SECRET=your_client_secret
+	  ```
+	- Or set VS Code settings (`Settings → Extensions → IssueTriage`) for `issuetriage.github.oauthClientId` and `issuetriage.github.oauthClientSecret`.
+5. Reload VS Code after updating environment variables or settings (`Developer: Reload Window`).
+
+### 2. Open the Issue Triage panel
+
 1. Press `F1` or `Ctrl+Shift+P` to open the command palette.
-2. Run `Issue Triage: Open Panel`.
-3. Toggle checklist items that apply to your current issue.
-4. Review the readiness score and suggested next action before scheduling work.
+2. Run **Issue Triage: Open Panel**.
+3. Use **Connect GitHub** if prompted to complete the device-code flow (copy the displayed code, follow the browser prompt, and authorize the app).
+
+### 3. Explore your backlog
+
+1. Pick a repository from the dropdown (default respects `issuetriage.github.defaultRepository` if configured).
+2. Search titles or apply label/assignee/milestone filters to focus on candidates.
+3. Click an issue card to open it on GitHub.
+4. Use **Refresh** to pull the latest data or **Issue Triage: Refresh Issues** from the command palette.
+
+### 4. Manage sessions
+
+- Run **Issue Triage: Sign Out** to revoke local tokens (secrets are stored via VS Code SecretStorage).
+- Re-run **Connect GitHub** any time you rotate OAuth credentials or need to change accounts.
 
 ## Requirements
 
-No additional configuration is required. The extension runs anywhere VS Code extensions are supported.
+- Visual Studio Code 1.105.0 or later.
+- Ability to register a GitHub OAuth App (personal or organization).
+- Network access to `github.com` for API calls.
 
 ## Release Notes
 
 ### 0.0.1
 
-- Initial release with the interactive triage dashboard.
+- Initial release with GitHub integration (device-code auth, repo + issue browsing, filterable backlog) and the readiness checklist scaffold.
+
+---
+
+## Troubleshooting
+
+- **"GitHub OAuth client credentials are not configured"**: Ensure `.env` or settings contain valid client ID/secret and reload VS Code.
+- **Device-code flow stalls**: Confirm the OAuth app allows the account you’re using and that the verification URL isn’t blocked by network policy.
+- **Rate limits**: The UI surfaces warnings when GitHub rate limits are hit; retry later or reduce refresh frequency.
 
 ---
 

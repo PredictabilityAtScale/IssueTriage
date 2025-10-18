@@ -16,6 +16,21 @@
         "command": "issuetriage.openPanel",
         "title": "Issue Triage: Open Panel",
         "category": "Issue Triage"
+      },
+      {
+        "command": "issuetriage.connectRepository",
+        "title": "Issue Triage: Connect Repository",
+        "category": "Issue Triage"
+      },
+      {
+        "command": "issuetriage.refreshIssues",
+        "title": "Issue Triage: Refresh Issues",
+        "category": "Issue Triage"
+      },
+      {
+        "command": "issuetriage.signOut",
+        "title": "Issue Triage: Sign Out",
+        "category": "Issue Triage"
       }
     ],
     "configuration": {
@@ -30,6 +45,21 @@
           "type": "string",
           "default": "",
           "description": "Default owner/repository slug to preload when connecting to GitHub."
+        },
+        "issuetriage.github.orgFilter": {
+          "type": "string",
+          "default": "",
+          "description": "Optional organization login used to filter the repository list when connecting to GitHub."
+        },
+        "issuetriage.github.oauthClientId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "GitHub OAuth application client ID used for device code authentication. Can be provided via the `ISSUETRIAGE_GITHUB_CLIENT_ID` environment variable."
+        },
+        "issuetriage.github.oauthClientSecret": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "GitHub OAuth application client secret used for device code authentication. Prefer setting the `ISSUETRIAGE_GITHUB_CLIENT_SECRET` environment variable instead of storing the secret in settings."
         },
         "issuetriage.assessment.preferredModel": {
           "type": "string",
@@ -52,6 +82,12 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
+  },
+  "dependencies": {
+    "@octokit/auth-oauth-device": "^6.1.0",
+    "@octokit/core": "^6.1.2",
+    "@octokit/plugin-paginate-rest": "^11.4.0",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/vscode": "^1.105.0",
