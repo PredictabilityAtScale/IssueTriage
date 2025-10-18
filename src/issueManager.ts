@@ -31,6 +31,7 @@ interface GitRemote {
 
 export interface FilterState extends IssueFilters {
 	search?: string;
+	state?: 'open' | 'closed';
 }
 
 interface IssueManagerState {
@@ -94,13 +95,15 @@ export class IssueManager implements vscode.Disposable {
 				this.state = { ...this.state, session };
 			}
 			const storedRepository = this.stateService.getWorkspace<RepositorySummary>(WORKSPACE_REPOSITORY_KEY);
-			const storedFilters = this.stateService.getWorkspace<FilterState>(WORKSPACE_FILTER_KEY, {});
+			const storedFilters = this.stateService.getWorkspace<FilterState>(WORKSPACE_FILTER_KEY, { state: 'open' });
 			if (storedRepository) {
 				this.state.selectedRepository = storedRepository;
 				this.workspaceRepositorySlug = this.normalizeRepositorySlug(storedRepository.fullName);
 			}
 			if (storedFilters) {
 				this.state.filters = storedFilters;
+			} else {
+				this.state.filters = { state: 'open' };
 			}
 			if (!storedRepository) {
 				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
@@ -207,10 +210,18 @@ export class IssueManager implements vscode.Disposable {
 	}
 
 	public async updateFilters(filters: FilterState): Promise<void> {
+		const previousState = this.state.filters.state;
 		this.state.filters = filters;
 		await this.stateService.updateWorkspace(WORKSPACE_FILTER_KEY, filters);
-		this.applyFilters();
-		this.emitState();
+		
+		// If the state filter (open/closed) changed, we need to refetch from GitHub
+		if (previousState !== filters.state && this.state.selectedRepository) {
+			await this.refreshIssues(true);
+		} else {
+			// Otherwise just apply client-side filters
+			this.applyFilters();
+			this.emitState();
+		}
 	}
 
 	public async signOut(): Promise<void> {

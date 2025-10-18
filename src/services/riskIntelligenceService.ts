@@ -365,7 +365,9 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		return pullRequests.slice(0, 5).map(pr => ({
 			label: `PR #${pr.number}`,
 			detail: `${pr.changedFiles ?? 0} files · +${pr.additions ?? 0}/-${pr.deletions ?? 0} · ${pr.reviewComments ?? 0} review comments`,
-			url: pr.url
+			url: pr.url,
+			prSummary: pr.title,
+			prNumber: pr.number
 		}));
 	}
 

@@ -8,17 +8,20 @@
 	const labelFilter = document.getElementById('labelFilter');
 	const assigneeFilter = document.getElementById('assigneeFilter');
 	const milestoneFilter = document.getElementById('milestoneFilter');
-	const statusBlock = document.getElementById('statusBlock');
 	const issueList = document.getElementById('issueList');
 	const emptyState = document.getElementById('emptyState');
 	const issueSummary = document.getElementById('issueSummary');
+	const loadingState = document.getElementById('loadingState');
 	const accountLabel = document.getElementById('accountLabel');
 	const automationBadge = document.getElementById('automationBadge');
 	const assessmentPanel = document.getElementById('assessmentPanel');
+	const openTab = document.getElementById('openTab');
+	const closedTab = document.getElementById('closedTab');
 
 	let latestState = null;
 	let selectedIssueNumber = undefined;
 	let latestAssessment = null;
+	let currentStateFilter = 'open';
 
 	window.addEventListener('message', event => {
 		const message = event.data;
@@ -55,7 +58,12 @@
 	});
 
 	connectButton.addEventListener('click', () => {
-		vscodeApi.postMessage({ type: 'webview.connect' });
+		const currentState = latestState;
+		if (currentState && currentState.session) {
+			vscodeApi.postMessage({ type: 'webview.signOut' });
+		} else {
+			vscodeApi.postMessage({ type: 'webview.connect' });
+		}
 	});
 
 	refreshButton.addEventListener('click', () => {
@@ -72,15 +80,39 @@
 			search: searchInput.value || undefined,
 			label: labelFilter.value || undefined,
 			assignee: assigneeFilter.value || undefined,
-			milestone: milestoneFilter.value || undefined
+			milestone: milestoneFilter.value || undefined,
+			state: currentStateFilter
 		};
+		console.log('[IssueTriage] Filters changed:', filters);
 		vscodeApi.postMessage({ type: 'webview.filtersChanged', filters });
 	}
 
-	searchInput.addEventListener('input', onFilterChanged);
 	labelFilter.addEventListener('change', onFilterChanged);
 	assigneeFilter.addEventListener('change', onFilterChanged);
 	milestoneFilter.addEventListener('change', onFilterChanged);
+
+	openTab.addEventListener('click', () => {
+		if (currentStateFilter !== 'open') {
+			console.log('[IssueTriage] Switching to open tab');
+			currentStateFilter = 'open';
+			updateStateTabs();
+			onFilterChanged();
+		}
+	});
+
+	closedTab.addEventListener('click', () => {
+		if (currentStateFilter !== 'closed') {
+			console.log('[IssueTriage] Switching to closed tab');
+			currentStateFilter = 'closed';
+			updateStateTabs();
+			onFilterChanged();
+		}
+	});
+
+	function updateStateTabs() {
+		openTab.classList.toggle('active', currentStateFilter === 'open');
+		closedTab.classList.toggle('active', currentStateFilter === 'closed');
+	}
 
 	issueList.addEventListener('click', event => {
 		const actionButton = event.target.closest('button[data-action]');
@@ -146,14 +178,22 @@
 		const { loading, session, repositories, selectedRepository, issues, issueMetadata, filters, error, lastUpdated, automationLaunchEnabled } = state;
 
 		connectButton.disabled = loading;
+		connectButton.textContent = session ? 'Sign Out' : 'Connect';
 		refreshButton.disabled = loading || !selectedRepository;
+
+		if (loadingState) {
+			loadingState.hidden = !loading;
+		}
+		if (loading) {
+			issueList.setAttribute('aria-busy', 'true');
+		} else {
+			issueList.removeAttribute('aria-busy');
+		}
 
 		if (session) {
 			accountLabel.textContent = 'Signed in as ' + session.login;
-			statusBlock.textContent = selectedRepository ? 'Connected to ' + selectedRepository.fullName : 'Select a repository to get started.';
 		} else {
 			accountLabel.textContent = 'Not signed in';
-			statusBlock.textContent = 'Sign in to connect your repository.';
 		}
 
 		if (automationLaunchEnabled) {
@@ -166,8 +206,11 @@
 			automationBadge.classList.remove('enabled');
 		}
 
-		if (error) {
-			statusBlock.textContent = error;
+		// Only sync state from backend on initial load or if we don't have a current state
+		// Don't overwrite user's tab selection with backend state during updates
+		if (currentStateFilter === null || currentStateFilter === undefined) {
+			currentStateFilter = filters.state || 'open';
+			updateStateTabs();
 		}
 
 		repositorySelect.innerHTML = '';
@@ -197,8 +240,13 @@
 			issueList.innerHTML = issues.map(issue => renderIssue(issue)).join('');
 		}
 
-		if (selectedRepository) {
-			const summaryBase = issues.length + ' open issues';
+
+		if (loading) {
+			issueSummary.textContent = 'Loading issues...';
+		} else if (selectedRepository) {
+			const filterState = filters.state || 'open';
+			const issueLabel = filterState === 'closed' ? 'closed issues' : 'open issues';
+			const summaryBase = issues.length + ' ' + issueLabel;
 			const updatedText = lastUpdated ? ' · Updated ' + new Date(lastUpdated).toLocaleString() : '';
 			issueSummary.textContent = summaryBase + updatedText;
 		} else {
@@ -263,7 +311,7 @@
 			return '';
 		}
 		if (summary.status === 'pending') {
-			return '<span class="badge risk-badge risk-pending">Risk Pending</span>';
+			return '';
 		}
 		if (summary.status === 'error') {
 			return '<span class="badge risk-badge risk-error">Risk Error</span>';
@@ -339,9 +387,11 @@
 		const updatedText = new Date(issue.updatedAt).toLocaleString();
 		const riskSummary = getRiskSummary(issue.number);
 		const riskBadge = renderRiskBadge(riskSummary);
-		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3>#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + (riskBadge || '') + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
+		const stateClass = issue.state === 'closed' ? 'issue-state-closed' : '';
+		const stateBadge = issue.state === 'closed' ? '<span class="badge state-badge">Closed</span>' : '';
+		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3>#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + (stateBadge || '') + (riskBadge || '') + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
 		const labelRow = labelBadges ? '<div class="meta-row">' + labelBadges + '</div>' : '';
-		return '<article class="issue-card" data-issue-number="' + issue.number + '" data-url="' + issue.url + '">' +
+		return '<article class="issue-card ' + stateClass + '" data-issue-number="' + issue.number + '" data-url="' + issue.url + '">' +
 			header +
 			'<div class="meta-row">' +
 				'<span>Updated ' + updatedText + '</span>' +

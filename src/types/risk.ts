@@ -13,6 +13,8 @@ export interface RiskEvidence {
 	label: string;
 	detail?: string;
 	url?: string;
+	prSummary?: string;
+	prNumber?: number;
 }
 
 export interface RiskProfile {

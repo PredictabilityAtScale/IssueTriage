@@ -117,7 +117,8 @@ suite('RiskIntelligenceService', () => {
 				labels: [],
 				assignees: [],
 				milestone: undefined,
-				updatedAt: new Date().toISOString()
+				updatedAt: new Date().toISOString(),
+				state: 'open'
 			}
 		];
 
@@ -156,7 +157,8 @@ suite('RiskIntelligenceService', () => {
 				labels: [],
 				assignees: [],
 				milestone: undefined,
-				updatedAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()
+				updatedAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
+				state: 'open'
 			}
 		];
 

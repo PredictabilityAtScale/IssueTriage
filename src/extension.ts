@@ -345,61 +345,156 @@ class IssueTriagePanel {
 					cursor: not-allowed;
 				}
 
+			.state-tabs {
+				display: flex;
+				gap: 4px;
+				padding: 12px 16px 0 16px;
+				border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+			}
+
+			.state-tab {
+				padding: 8px 16px;
+				border: none;
+				background: transparent;
+				color: var(--vscode-descriptionForeground);
+				cursor: pointer;
+				border-bottom: 2px solid transparent;
+				font-weight: 500;
+			}
+
+			.state-tab.active {
+				color: var(--vscode-foreground);
+				border-bottom-color: var(--vscode-button-background);
+			}
+
+			.state-tab:hover:not(.active) {
+				background: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-button-background) 10%);
+			}
+
+			.filters-bar {
+				display: flex;
+				gap: 12px;
+				padding: 12px 16px;
+				border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				background: color-mix(in srgb, var(--vscode-editor-background) 95%, var(--vscode-button-background) 5%);
+				flex-wrap: wrap;
+				align-items: flex-end;
+			}
+
+			.filter-group {
+				display: flex;
+				flex-direction: column;
+				gap: 4px;
+				min-width: 140px;
+			}
+
+			.filter-group.search-group {
+				flex: 1;
+				min-width: 200px;
+			}
+
+		.filter-group.repo-group {
+			min-width: 280px;
+		}
+
+		.repo-controls {
+			display: flex;
+			gap: 8px;
+			align-items: center;
+		}
+
+		.repo-controls select {
+			flex: 1;
+		}
+
+		.compact-button {
+			padding: 6px 12px;
+			font-size: 12px;
+			white-space: nowrap;
+			background: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+			border-color: transparent;
+		}
+
+		.filter-label {
+			font-size: 11px;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+			font-weight: 600;
+		}
+
+		.container {
+			display: grid;
+			grid-template-columns: 1fr;
+			height: calc(100vh - 160px);
+		}
+
+			@media (min-width: 960px) {
 				.container {
-					display: grid;
-					grid-template-columns: 1fr;
-					height: calc(100vh - 60px);
+					grid-template-columns: 1fr 1fr;
 				}
+			}
 
-				@media (min-width: 960px) {
-					.container {
-						grid-template-columns: 320px 1fr;
-					}
+			.issue-list-panel {
+				border-right: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				padding: 16px;
+				overflow-y: auto;
+				display: flex;
+				flex-direction: column;
+				gap: 12px;
+				position: relative;
+			}
+
+			.loading-state {
+				position: absolute;
+				top: 0;
+				left: 0;
+				right: 0;
+				bottom: 0;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 12px;
+				background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent 15%);
+				backdrop-filter: blur(2px);
+				z-index: 1;
+			}
+
+			.loading-state[hidden] {
+				display: none;
+			}
+
+			.loading-spinner {
+				width: 28px;
+				height: 28px;
+				border-radius: 50%;
+				border: 3px solid color-mix(in srgb, var(--vscode-editor-foreground) 20%, transparent 80%);
+				border-top-color: var(--vscode-button-background);
+				animation: issuetriage-spin 0.9s linear infinite;
+			}
+
+			@keyframes issuetriage-spin {
+				from {
+					transform: rotate(0deg);
 				}
-
-				.sidebar {
-					border-right: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
-					padding: 16px;
-					overflow-y: auto;
+				to {
+					transform: rotate(360deg);
 				}
+			}
 
-				.content {
-					padding: 16px;
-					overflow-y: auto;
-				}
+			.detail-panel {
+				padding: 16px;
+				overflow-y: auto;
+			}
 
-				.issue-list {
-					display: grid;
-					gap: 8px;
-				}
+			.issue-list {
+				display: grid;
+				gap: 8px;
+			}
 
-				.filters {
-					display: grid;
-					gap: 12px;
-					margin-top: 16px;
-				}
-
-				.filters label {
-					display: flex;
-					flex-direction: column;
-					gap: 4px;
-					font-size: 11px;
-					text-transform: uppercase;
-					letter-spacing: 0.05em;
-					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-				}
-
-				.filters label > span {
-					font-weight: 600;
-				}
-
-				.filters select,
-				.filters input[type="search"] {
-					width: 100%;
-					margin: 0;
-				}
-
-				.issue-card {
+			.issue-card {
 					padding: 12px;
 					border-radius: 6px;
 					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
@@ -423,20 +518,22 @@ class IssueTriagePanel {
 					min-width: 0;
 				}
 
-				.issue-card.selected {
-					border-color: var(--vscode-button-background);
-					background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-button-background) 20%);
-				}
+			.issue-card.selected {
+				border-color: var(--vscode-button-background);
+				background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-button-background) 20%);
+			}
 
-				.issue-card h3 {
-					margin: 0;
-					font-size: 14px;
-					overflow: hidden;
-					text-overflow: ellipsis;
-					white-space: nowrap;
-				}
+			.issue-card.issue-state-closed {
+				opacity: 0.85;
+			}
 
-				.risk-badge {
+			.issue-card h3 {
+				margin: 0;
+				font-size: 14px;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}				.risk-badge {
 					padding: 2px 6px;
 					border-radius: 999px;
 					font-size: 11px;
@@ -507,13 +604,16 @@ class IssueTriagePanel {
 					font-size: 12px;
 				}
 
-				.badge {
-					padding: 2px 6px;
-					border-radius: 999px;
-					background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-button-background) 15%);
-				}
+			.badge {
+				padding: 2px 6px;
+				border-radius: 999px;
+				background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-button-background) 15%);
+			}
 
-				.status {
+			.state-badge {
+				background: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-descriptionForeground) 10%);
+				border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+			}				.status {
 					padding: 12px;
 					border-radius: 6px;
 					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
@@ -721,44 +821,53 @@ class IssueTriagePanel {
 					</div>
 				</div>
 				<div class="toolbar">
-					<button id="connect" class="primary">Connect GitHub</button>
 					<button id="refresh">Refresh</button>
 				</div>
 			</div>
-			<div class="container">
-				<aside class="sidebar">
-					<div class="status" id="statusBlock">Sign in to connect your repository.</div>
-					<div class="filters" aria-live="polite">
-						<label>
-							<span>Repository</span>
-							<select id="repositorySelect"></select>
-						</label>
-						<label>
-							<span>Search</span>
-							<input type="search" id="searchInput" placeholder="Search titles" />
-						</label>
-						<label>
-							<span>Label</span>
-							<select id="labelFilter"></select>
-						</label>
-						<label>
-							<span>Assignee</span>
-							<select id="assigneeFilter"></select>
-						</label>
-						<label>
-							<span>Milestone</span>
-							<select id="milestoneFilter"></select>
-						</label>
+			<div class="filters-bar" aria-live="polite">
+				<div class="filter-group repo-group">
+					<span class="filter-label">Repository</span>
+					<div class="repo-controls">
+						<select id="repositorySelect"></select>
+						<button id="connect" class="compact-button">Connect</button>
 					</div>
-				</aside>
-				<main class="content">
+				</div>
+				<div class="filter-group search-group">
+					<span class="filter-label">Search</span>
+					<input type="search" id="searchInput" placeholder="Search titles" />
+				</div>
+				<div class="filter-group">
+					<span class="filter-label">Label</span>
+					<select id="labelFilter"></select>
+				</div>
+				<div class="filter-group">
+					<span class="filter-label">Assignee</span>
+					<select id="assigneeFilter"></select>
+				</div>
+				<div class="filter-group">
+					<span class="filter-label">Milestone</span>
+					<select id="milestoneFilter"></select>
+				</div>
+			</div>
+			<div class="state-tabs">
+				<button class="state-tab active" id="openTab">Open</button>
+				<button class="state-tab" id="closedTab">Closed</button>
+			</div>
+			<div class="container">
+				<div class="issue-list-panel">
 					<div id="issueSummary" class="meta-row"></div>
 					<section id="issueList" class="issue-list"></section>
+					<div id="loadingState" class="loading-state" hidden role="status" aria-live="polite">
+						<div class="loading-spinner" aria-hidden="true"></div>
+						<p>Loading issues...</p>
+					</div>
 					<div id="emptyState" class="empty-state" hidden>
 						<p>No issues match your filters.</p>
 					</div>
+				</div>
+				<div class="detail-panel">
 					<section id="assessmentPanel" class="assessment-panel" aria-live="polite"></section>
-				</main>
+				</div>
 			</div>`;
 	}
 
@@ -797,6 +906,9 @@ class IssueTriagePanel {
 			}
 			case 'webview.filtersChanged':
 				await this.services.issueManager.updateFilters(this.ensureFilterPayload(message.filters));
+				break;
+			case 'webview.signOut':
+				await this.services.issueManager.signOut();
 				break;
 			case 'webview.openIssue':
 				if (typeof message.url === 'string') {
@@ -930,11 +1042,14 @@ class IssueTriagePanel {
 			return {};
 		}
 		const payload = value as Record<string, unknown>;
+		const stateValue = this.normalizeString(payload.state);
+		const normalizedState = stateValue === 'open' || stateValue === 'closed' ? stateValue : undefined;
 		return {
 			search: this.normalizeString(payload.search),
 			label: this.normalizeString(payload.label),
 			assignee: this.normalizeString(payload.assignee),
-			milestone: this.normalizeString(payload.milestone)
+			milestone: this.normalizeString(payload.milestone),
+			state: normalizedState
 		};
 	}
 }

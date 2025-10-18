@@ -26,6 +26,7 @@ type IssueResponseItem = {
 	milestone?: { title?: string } | null;
 	updated_at: string;
 	pull_request?: unknown;
+	state?: string;
 };
 
 type IssueDetailResponse = IssueResponseItem & {
@@ -97,6 +98,7 @@ export interface IssueSummary {
 	assignees: string[];
 	milestone?: string;
 	updatedAt: string;
+	state: 'open' | 'closed';
 }
 
 export interface IssueDetail extends IssueSummary {
@@ -133,6 +135,7 @@ export interface IssueFilters {
 	assignee?: string;
 	milestone?: string;
 	search?: string;
+	state?: 'open' | 'closed' | 'all';
 }
 
 interface CacheEntry<T> {
@@ -207,7 +210,7 @@ export class GitHubClient {
 				owner,
 				repo,
 				per_page: 50,
-				state: 'open',
+				state: filters.state || 'open',
 				labels: filters.label || undefined,
 				assignee: filters.assignee || undefined,
 				milestone: filters.milestone || undefined
@@ -222,7 +225,8 @@ export class GitHubClient {
 				labels: issue.labels?.map((label: string | { name?: string }) => (typeof label === 'string' ? label : label.name ?? '')).filter(Boolean) ?? [],
 				assignees: issue.assignees?.map((assignee: { login?: string } | null) => assignee?.login ?? '').filter(Boolean) ?? [],
 				milestone: issue.milestone?.title,
-				updatedAt: issue.updated_at
+				updatedAt: issue.updated_at,
+				state: issue.state as 'open' | 'closed' || 'open'
 			}));
 
 			if (filters.search) {
@@ -260,7 +264,8 @@ export class GitHubClient {
 				updatedAt: data.updated_at,
 				createdAt: data.created_at,
 				body: (data.body ?? '').trim(),
-				author: data.user?.login ?? 'unknown'
+				author: data.user?.login ?? 'unknown',
+				state: (data.state as 'open' | 'closed') || 'open'
 			};
 		} catch (error) {
 			this.handleError('github.issue.detail.failed', error);
