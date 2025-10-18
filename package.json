@@ -17,7 +17,27 @@
         "title": "Issue Triage: Open Panel",
         "category": "Issue Triage"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "IssueTriage",
+      "properties": {
+        "issuetriage.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable IssueTriage telemetry collection to improve automation readiness insights."
+        },
+        "issuetriage.github.defaultRepository": {
+          "type": "string",
+          "default": "",
+          "description": "Default owner/repository slug to preload when connecting to GitHub."
+        },
+        "issuetriage.assessment.preferredModel": {
+          "type": "string",
+          "default": "openrouter/anthropic/claude-3-haiku",
+          "markdownDescription": "Preferred OpenRouter model identifier used for initial assessments."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

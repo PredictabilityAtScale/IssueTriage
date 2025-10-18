@@ -1,13 +1,30 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { CredentialService } from './services/credentialService';
+import { SettingsService } from './services/settingsService';
+import { TelemetryService } from './services/telemetryService';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
 	console.log('IssueTriage extension activated.');
 
+	const settings = new SettingsService();
+	const services: ServiceBundle = {
+		credentials: new CredentialService(context.secrets),
+		settings,
+		telemetry: new TelemetryService({ settings })
+	};
+
+	context.subscriptions.push(services.telemetry);
+	services.telemetry.trackEvent('extension.activate');
+	const secretSubscription = services.credentials.onDidChange(id => {
+		services.telemetry.trackEvent('credentials.changed', { scope: id });
+	});
+	context.subscriptions.push(secretSubscription);
+
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
-		IssueTriagePanel.createOrShow(context);
+		IssueTriagePanel.createOrShow(services);
 	});
 
 	context.subscriptions.push(openPanel);
@@ -16,15 +33,21 @@ export function activate(context: vscode.ExtensionContext) {
 // This method is called when your extension is deactivated
 export function deactivate() {}
 
+interface ServiceBundle {
+	credentials: CredentialService;
+	settings: SettingsService;
+	telemetry: TelemetryService;
+}
+
 class IssueTriagePanel {
 	public static readonly viewType = 'issuetriage.panel';
 	private static currentPanel: IssueTriagePanel | undefined;
 
 	private readonly panel: vscode.WebviewPanel;
-	private readonly extensionUri: vscode.Uri;
+	private readonly services: ServiceBundle;
 	private disposables: vscode.Disposable[] = [];
 
-	public static createOrShow(context: vscode.ExtensionContext) {
+	public static createOrShow(services: ServiceBundle) {
 		const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
 		if (IssueTriagePanel.currentPanel) {
@@ -42,12 +65,12 @@ class IssueTriagePanel {
 			}
 		);
 
-		IssueTriagePanel.currentPanel = new IssueTriagePanel(panel, context.extensionUri);
+		IssueTriagePanel.currentPanel = new IssueTriagePanel(panel, services);
 	}
 
-	private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+	private constructor(panel: vscode.WebviewPanel, services: ServiceBundle) {
 		this.panel = panel;
-		this.extensionUri = extensionUri;
+		this.services = services;
 
 		this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
 		this.update();
@@ -56,6 +79,7 @@ class IssueTriagePanel {
 	private update() {
 		this.panel.title = 'Issue Triage';
 		this.panel.webview.html = this.getHtmlForWebview(this.panel.webview);
+		this.services.telemetry.trackEvent('panel.rendered');
 	}
 
 	public dispose() {
