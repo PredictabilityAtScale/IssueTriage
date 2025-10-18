@@ -9,9 +9,12 @@ As of the Phase 1 build, the extension connects directly to GitHub, surfaces r
 - Launch the **Issue Triage** panel from the command palette (`Issue Triage: Open Panel`).
 - Authenticate with GitHub via device code to load repositories you own or collaborate on.
 - Browse open issues, search titles, and filter by label, assignee, or milestone inside VS Code.
+- See inline risk badges powered by historical GitHub activity to highlight hotspots before you assess them.
 - Track readiness with the weighted checklist focused on problem clarity, impact, dependencies, safeguards, and validation (future phases enrich this with AI scoring).
 - See the most recent assessment’s composite score, dimension breakdowns, summary, and recommendations directly inside the panel, with quick links back to the issue or GitHub comment.
+- Review a dedicated **Risk Intelligence** section on every issue that surfaces linked pull requests, change volume, review friction, and top risk drivers.
 - Run **Issue Triage: Assess Selected Issue** to generate an AI-assisted readiness assessment using OpenRouter, with results stored locally and (optionally) posted back to the GitHub issue.
+- Use **Issue Triage: Run Context Tool** to execute curated CLI utilities (like the built-in workspace snapshot) and feed their output into the next assessment run.
 - Jump from the list to the GitHub issue in your browser for deeper inspection.
 - Monitor whether guarded automation launch is enabled via the panel badge (controlled through `issuetriage.automation.launchEnabled`).
 
@@ -71,7 +74,19 @@ IssueTriage uses OpenRouter to power AI-driven assessments.
 3. The extension will call OpenRouter, write the result to a local SQLite database, and (if `issuetriage.assessment.publishComments` is true) upsert a single comment on the GitHub issue tagged with `<!-- IssueTriage Assessment -->`.
 4. Composite and dimension scores, a summary, and recommendations now appear in both the panel and the optional GitHub comment for the team to review.
 
-### 6. Manage sessions
+### Optional: Tune risk analysis
+
+1. Adjust `issuetriage.risk.lookbackDays` (default 180) to widen or narrow the historical window that drives risk intelligence.
+2. Use `issuetriage.risk.labelFilters` to restrict hydration to issues carrying specific labels (helpful when triage leads focus on certain workstreams).
+3. Risk badges and the Risk Intelligence panel will refresh automatically the next time you load or refresh issues.
+
+### 6. Run workspace context tools
+
+1. Run **Issue Triage: Run Context Tool** and pick the built-in **Workspace Snapshot** or a custom tool you've registered under `issuetriage.cliTools`.
+2. Review command output in the *IssueTriage CLI Context* output channel; the latest successful runs are automatically attached to future assessments.
+3. Add additional tools by updating the `issuetriage.cliTools` setting with objects that specify an `id`, `command`, optional `args`, and whether they should `autoRun` before each assessment.
+
+### 7. Manage sessions
 
 - Run **Issue Triage: Sign Out** to revoke local tokens (secrets are stored via VS Code SecretStorage).
 - Re-run **Connect GitHub** any time you rotate OAuth credentials or need to change accounts.

@@ -7,3 +7,4 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ## [0.0.1] - 2025-10-17
 
 - Initial release with the Issue Triage webview dashboard
+- Added CLI context orchestrator with a built-in workspace snapshot tool feeding assessments via prompt context

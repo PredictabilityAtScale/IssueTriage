@@ -4,6 +4,8 @@ import { GitHubClient, IssueFilters, IssueSummary, RepositorySummary } from './s
 import { SettingsService } from './services/settingsService';
 import { StateService } from './services/stateService';
 import { TelemetryService } from './services/telemetryService';
+import { RiskIntelligenceService, RiskUpdateEvent } from './services/riskIntelligenceService';
+import type { RiskSummary } from './types/risk';
 
 interface GitExtensionApiWrapper {
 	getAPI(version: number): GitApi;
@@ -46,6 +48,7 @@ interface IssueManagerState {
 	lastUpdated?: string;
 	session?: GitHubSessionMetadata;
 	automationLaunchEnabled: boolean;
+	riskSummaries: Record<number, RiskSummary>;
 }
 
 const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
@@ -63,7 +66,8 @@ export class IssueManager implements vscode.Disposable {
 			milestones: []
 		},
 		filters: {},
-		automationLaunchEnabled: false
+		automationLaunchEnabled: false,
+		riskSummaries: {}
 	};
 	private allIssues: IssueSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
@@ -73,8 +77,12 @@ export class IssueManager implements vscode.Disposable {
 		private readonly github: GitHubClient,
 		private readonly settings: SettingsService,
 		private readonly stateService: StateService,
-		private readonly telemetry: TelemetryService
-		) {}
+		private readonly telemetry: TelemetryService,
+		private readonly risk: RiskIntelligenceService
+		) {
+		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
+		this.disposables.push(riskSubscription);
+	}
 
 		public readonly onDidChangeState = this.emitter.event;
 		private workspaceRepositorySlug?: string;
@@ -141,6 +149,7 @@ export class IssueManager implements vscode.Disposable {
 			const issues = await this.github.listIssues(fullName, filters, forceRefresh);
 			this.allIssues = issues;
 			this.applyFilters();
+			await this.updateRiskSummaries(fullName);
 			this.state.lastUpdated = new Date().toISOString();
 			this.state.error = undefined;
 			this.emitState();
@@ -189,6 +198,7 @@ export class IssueManager implements vscode.Disposable {
 		}
 		this.state.selectedRepository = repository;
 		this.workspaceRepositorySlug = this.normalizeRepositorySlug(repository.fullName);
+		this.state.riskSummaries = {};
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, repository);
 		this.emitState();
 		if (refresh) {
@@ -216,7 +226,8 @@ export class IssueManager implements vscode.Disposable {
 				milestones: []
 			},
 			filters: {},
-			automationLaunchEnabled: this.readAutomationFlag()
+			automationLaunchEnabled: this.readAutomationFlag(),
+			riskSummaries: {}
 		};
 		this.allIssues = [];
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, undefined);
@@ -264,6 +275,23 @@ export class IssueManager implements vscode.Disposable {
 		return repositories[0];
 	}
 
+	private async updateRiskSummaries(repository: string): Promise<void> {
+		try {
+			const riskMap = await this.risk.primeIssues(repository, this.allIssues);
+			const summaries: Record<number, RiskSummary> = {};
+			for (const [issueNumber, summary] of riskMap.entries()) {
+				summaries[issueNumber] = summary;
+			}
+			this.state.riskSummaries = summaries;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.risk.primeFailed', {
+				repository,
+				message
+			});
+		}
+	}
+
 	private applyFilters(): void {
 		const { filters } = this.state;
 		let filtered = [...this.allIssues];
@@ -303,9 +331,30 @@ export class IssueManager implements vscode.Disposable {
 		this.emitState();
 	}
 
+	private onRiskUpdate(event: RiskUpdateEvent): void {
+		const selected = this.state.selectedRepository?.fullName;
+		if (!selected) {
+			return;
+		}
+		const eventSlug = this.normalizeRepositorySlug(event.repository);
+		const selectedSlug = this.normalizeRepositorySlug(selected);
+		if (!eventSlug || !selectedSlug || eventSlug !== selectedSlug) {
+			return;
+		}
+		this.state.riskSummaries = {
+			...this.state.riskSummaries,
+			[event.issueNumber]: event.summary
+		};
+		this.emitState();
+	}
+
 	private emitState(): void {
 		this.state.automationLaunchEnabled = this.readAutomationFlag();
-		this.emitter.fire({ ...this.state, issues: [...this.state.issues] });
+		this.emitter.fire({
+			...this.state,
+			issues: [...this.state.issues],
+			riskSummaries: { ...this.state.riskSummaries }
+		});
 	}
 
 	private readAutomationFlag(): boolean {

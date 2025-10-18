@@ -2,6 +2,9 @@ import { AssessmentStorage, AssessmentRecord } from './assessmentStorage';
 import { SettingsService } from './settingsService';
 import { TelemetryService } from './telemetryService';
 import { GitHubClient, IssueDetail } from './githubClient';
+import { CliToolService } from './cliToolService';
+import { RiskIntelligenceService } from './riskIntelligenceService';
+import type { RiskSummary } from '../types/risk';
 
 const COMMENT_TAG = '<!-- IssueTriage Assessment -->';
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
@@ -35,7 +38,9 @@ export class AssessmentService {
 		private readonly storage: AssessmentStorage,
 		private readonly settings: SettingsService,
 		private readonly telemetry: TelemetryService,
-		private readonly github: GitHubClient
+		private readonly github: GitHubClient,
+		private readonly cliTools: CliToolService,
+		private readonly risk: RiskIntelligenceService
 	) {}
 
 	public dispose(): void {
@@ -52,14 +57,22 @@ export class AssessmentService {
 		const publishComments = this.settings.get<boolean>('assessment.publishComments', true) ?? true;
 		const previousAssessment = await this.storage.getLatestAssessment(repository, issueNumber);
 
+		await this.cliTools.ensureAutoRunResults();
+
 		const issue = await this.github.getIssueDetails(repository, issueNumber);
 		const requestStartedAt = Date.now();
 		try {
 			const assessment = await this.generateAssessment(issue, apiKey, model);
+			const riskSummary = this.risk.getSummary(repository, issueNumber);
+			const adjustedScores = this.applyRiskModifiers(assessment.scores, riskSummary);
+			const adjustedAssessment: AssessmentModelPayload & { rawResponse: string } = {
+				...assessment,
+				scores: adjustedScores
+			};
 			let commentId = previousAssessment?.commentId;
 			if (publishComments) {
 				try {
-					const markdown = this.buildAssessmentComment(issue, assessment, model);
+					const markdown = this.buildAssessmentComment(issue, adjustedAssessment, model);
 					const updatedCommentId = await this.github.upsertIssueComment(repository, issueNumber, markdown, commentId);
 					commentId = updatedCommentId;
 				} catch (commentError) {
@@ -74,18 +87,26 @@ export class AssessmentService {
 			const record = await this.storage.saveAssessment({
 				repository,
 				issueNumber,
-				compositeScore: assessment.scores.composite,
-				requirementsScore: assessment.scores.requirements,
-				complexityScore: assessment.scores.complexity,
-				securityScore: assessment.scores.security,
-				businessScore: assessment.scores.business,
-				recommendations: assessment.recommendations,
-				summary: assessment.summary,
+				compositeScore: adjustedAssessment.scores.composite,
+				requirementsScore: adjustedAssessment.scores.requirements,
+				complexityScore: adjustedAssessment.scores.complexity,
+				securityScore: adjustedAssessment.scores.security,
+				businessScore: adjustedAssessment.scores.business,
+				recommendations: adjustedAssessment.recommendations,
+				summary: adjustedAssessment.summary,
 				model,
 				commentId,
 				createdAt: new Date().toISOString(),
-				rawResponse: assessment.rawResponse
+				rawResponse: adjustedAssessment.rawResponse
 			});
+
+			if (riskSummary && riskSummary.status === 'ready' && riskSummary.riskLevel && riskSummary.riskLevel !== 'low') {
+				this.telemetry.trackEvent('assessment.riskAdjusted', {
+					repository,
+					issue: String(issueNumber),
+					riskLevel: riskSummary.riskLevel
+				});
+			}
 
 			this.telemetry.trackEvent('assessment.completed', {
 				repository,
@@ -138,6 +159,28 @@ export class AssessmentService {
 
 	public isAutomationLaunchEnabled(): boolean {
 		return this.settings.get<boolean>('automation.launchEnabled', false) ?? false;
+	}
+
+	private applyRiskModifiers(scores: AssessmentModelPayload['scores'], riskSummary: RiskSummary | undefined): AssessmentModelPayload['scores'] {
+		if (!riskSummary || riskSummary.status !== 'ready' || !riskSummary.riskLevel) {
+			return scores;
+		}
+		const modifier = riskSummary.riskLevel === 'high'
+			? 0.8
+			: riskSummary.riskLevel === 'medium'
+				? 0.9
+				: 1;
+		if (modifier === 1) {
+			return scores;
+		}
+		const adjust = (value: number) => Math.min(100, Math.max(0, Number((value * modifier).toFixed(1))));
+		return {
+			composite: adjust(scores.composite),
+			requirements: scores.requirements,
+			complexity: adjust(scores.complexity),
+			security: scores.security,
+			business: scores.business
+		};
 	}
 
 	private resolveModel(): string {
@@ -266,6 +309,11 @@ export class AssessmentService {
 			'Issue body:',
 			issue.body || '(empty)'
 		];
+		
+		const cliContext = this.cliTools.getPromptContext();
+		if (cliContext) {
+			details.push('', 'CLI tool context captured by IssueTriage:', cliContext.trim());
+		}
 
 		return `${details.join('\n')}\n\nReturn a JSON object with the following shape: {
   "summary": string,

@@ -33,6 +33,11 @@
         "category": "Issue Triage"
       },
       {
+        "command": "issuetriage.runContextTool",
+        "title": "Issue Triage: Run Context Tool",
+        "category": "Issue Triage"
+      },
+      {
         "command": "issuetriage.signOut",
         "title": "Issue Triage: Sign Out",
         "category": "Issue Triage"
@@ -110,6 +115,101 @@
           "type": "string",
           "default": "openai/gpt-5-mini",
           "markdownDescription": "Preferred OpenRouter model identifier used for initial assessments."
+        },
+        "issuetriage.risk.lookbackDays": {
+          "type": "number",
+          "default": 180,
+          "minimum": 7,
+          "description": "Number of days of history IssueTriage analyzes when computing risk intelligence."
+        },
+        "issuetriage.risk.labelFilters": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Only hydrate risk intelligence for issues containing one of the provided labels. Leave empty to include all issues.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "issuetriage.cliTools": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Configure additional CLI context tools IssueTriage can execute. Values support ${workspaceRoot}, ${workspaceFolder}, and ${extensionRoot} tokens.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "command"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier used to reference the tool."
+              },
+              "title": {
+                "type": "string",
+                "description": "Friendly name displayed in QuickPick lists."
+              },
+              "description": {
+                "type": "string",
+                "description": "Optional description for the run picker."
+              },
+              "command": {
+                "type": "string",
+                "description": "Executable or script to run."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments passed to the command."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the process. Defaults to the workspace root."
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables injected into the process. Values support token replacement.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true,
+                "description": "Disable the tool without removing its configuration."
+              },
+              "autoRun": {
+                "type": "boolean",
+                "description": "Automatically run the tool before assessments."
+              },
+              "refreshIntervalMs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Minimum milliseconds between automatic runs."
+              },
+              "timeoutMs": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Maximum runtime (milliseconds) before IssueTriage terminates the process."
+              },
+              "shell": {
+                "type": "boolean",
+                "description": "Run the command through the system shell."
+              },
+              "outputType": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "json"
+                ],
+                "default": "text",
+                "description": "Treat stdout as plain text or JSON for parsing."
+              }
+            }
+          }
         },
         "issuetriage.automation.launchEnabled": {
           "type": "boolean",
