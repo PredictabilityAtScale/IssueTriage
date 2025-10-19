@@ -1,7 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
-import { existsSync } from 'fs';
+import { existsSync, promises as fs } from 'fs';
 import * as path from 'path';
 import { config as loadEnv } from 'dotenv';
 import { CredentialService } from './services/credentialService';
@@ -10,6 +10,7 @@ import { TelemetryService } from './services/telemetryService';
 import { StateService } from './services/stateService';
 import { GitHubAuthService } from './services/githubAuthService';
 import { GitHubClient } from './services/githubClient';
+import type { IssueSummary } from './services/githubClient';
 import { IssueManager, FilterState } from './issueManager';
 import { AssessmentStorage } from './services/assessmentStorage';
 import { AssessmentService, AssessmentError } from './services/assessmentService';
@@ -17,6 +18,7 @@ import { CliToolService } from './services/cliToolService';
 import { RiskStorage } from './services/riskStorage';
 import { RiskIntelligenceService } from './services/riskIntelligenceService';
 import type { AssessmentRecord } from './services/assessmentStorage';
+import type { RiskSummary } from './types/risk';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
@@ -1132,6 +1134,21 @@ class IssueTriagePanel {
 				await this.sendAssessmentHistory(repository, issueNumber);
 				break;
 			}
+			case 'webview.exportAssessment': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				const formatValue = typeof message.format === 'string' ? message.format : undefined;
+				const format = formatValue === 'markdown' || formatValue === 'json' ? formatValue : undefined;
+				if (issueNumber === undefined || !format) {
+					break;
+				}
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName;
+				if (!repository) {
+					break;
+				}
+				await this.exportAssessment(repository, issueNumber, format);
+				break;
+			}
 			case 'webview.filtersChanged':
 				await this.services.issueManager.updateFilters(this.ensureFilterPayload(message.filters));
 				break;
@@ -1238,6 +1255,271 @@ class IssueTriagePanel {
 				message: error instanceof Error ? error.message : 'Unable to load assessment history.'
 			});
 		}
+	}
+
+	private async exportAssessment(repository: string, issueNumber: number, format: 'markdown' | 'json'): Promise<void> {
+		const snapshot = this.services.issueManager.getSnapshot();
+		const issue = snapshot.issues.find(item => item.number === issueNumber);
+		if (!issue) {
+			void vscode.window.showWarningMessage(`Issue #${issueNumber} is no longer available to export.`);
+			return;
+		}
+
+		let record: AssessmentRecord | undefined;
+		try {
+			record = await this.services.assessment.getLatestAssessment(repository, issueNumber);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unable to load latest assessment from disk.';
+			void vscode.window.showErrorMessage(`IssueTriage export failed: ${message}`);
+			return;
+		}
+
+		if (!record) {
+			void vscode.window.showInformationMessage(`No IssueTriage assessment found for #${issueNumber}. Run an assessment before exporting.`);
+			return;
+		}
+
+		const readiness = snapshot.assessmentSummaries[issueNumber]?.readiness;
+		const riskSummary = snapshot.riskSummaries[issueNumber];
+		const readinessMeta = this.getReadinessMetadata(readiness);
+		const content = format === 'markdown'
+			? this.createMarkdownExport(repository, issue, record, readinessMeta, riskSummary)
+			: this.createJsonExport(repository, issue, record, readinessMeta, riskSummary);
+
+		const defaultUri = this.buildDefaultExportUri(format, issue);
+		const filters: Record<string, string[]> = format === 'markdown'
+			? { Markdown: ['md', 'markdown'] }
+			: { JSON: ['json'] };
+		const saveUri = await vscode.window.showSaveDialog({
+			defaultUri,
+			saveLabel: format === 'markdown' ? 'Export Markdown' : 'Export JSON',
+			filters
+		});
+		if (!saveUri) {
+			return;
+		}
+
+		try {
+			await fs.writeFile(saveUri.fsPath, content, 'utf8');
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unable to write export file.';
+			void vscode.window.showErrorMessage(`IssueTriage export failed: ${message}`);
+			return;
+		}
+
+		this.services.telemetry.trackEvent('assessment.export', {
+			repository,
+			issue: String(issueNumber),
+			format
+		});
+
+		const openAction = 'Open File';
+		const selection = await vscode.window.showInformationMessage(
+			`IssueTriage ${format === 'markdown' ? 'Markdown' : 'JSON'} export saved to ${saveUri.fsPath}.`,
+			openAction
+		);
+		if (selection === openAction) {
+			const document = await vscode.workspace.openTextDocument(saveUri);
+			await vscode.window.showTextDocument(document, { preview: false });
+		}
+	}
+
+	private buildDefaultExportUri(format: 'markdown' | 'json', issue: IssueSummary): vscode.Uri | undefined {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			return undefined;
+		}
+		const extension = format === 'markdown' ? '.md' : '.json';
+		const fileName = `issue-${issue.number}-assessment${extension}`;
+		const filePath = path.join(workspaceFolder.uri.fsPath, fileName);
+		return vscode.Uri.file(filePath);
+	}
+
+	private getReadinessMetadata(readiness?: string): { key?: string; label: string; description?: string } {
+		switch (readiness) {
+			case 'ready':
+				return { key: 'ready', label: 'Automation Ready', description: 'Safe to hand off to automation.' };
+			case 'prepare':
+				return { key: 'prepare', label: 'Prep Required', description: 'Add missing context then reassess.' };
+			case 'review':
+				return { key: 'review', label: 'Needs Review', description: 'Human review recommended before automation.' };
+			case 'manual':
+				return { key: 'manual', label: 'Manual Only', description: 'Keep this issue manual for now.' };
+			default:
+				return { label: 'Not Assessed Yet' };
+		}
+	}
+
+	private createMarkdownExport(
+		repository: string,
+		issue: IssueSummary,
+		record: AssessmentRecord,
+		readiness: { key?: string; label: string; description?: string },
+		riskSummary: RiskSummary | undefined
+	): string {
+		const assessedAt = this.formatIsoDate(record.createdAt);
+		const commentUrl = this.buildCommentUrl(record);
+		const metadataLines = [
+			`- Repository: ${repository}`,
+			`- Issue: [#${issue.number}](${issue.url})`,
+			`- Title: ${issue.title}`,
+			`- State: ${issue.state}`,
+			`- Labels: ${issue.labels.length ? issue.labels.join(', ') : 'None'}`,
+			`- Assignees: ${issue.assignees.length ? issue.assignees.join(', ') : 'None'}`,
+			`- Milestone: ${issue.milestone ?? 'None'}`,
+			`- Updated: ${this.formatIsoDate(issue.updatedAt)}`
+		];
+
+		const tableLines = [
+			'| Dimension | Score |',
+			'| --- | --- |',
+			`| Composite | ${record.compositeScore.toFixed(1)} |`,
+			`| Requirements | ${record.requirementsScore.toFixed(1)} |`,
+			`| Complexity | ${record.complexityScore.toFixed(1)} |`,
+			`| Security | ${record.securityScore.toFixed(1)} |`,
+			`| Business Impact | ${record.businessScore.toFixed(1)} |`
+		];
+
+		const recommendationLines = record.recommendations.length
+			? record.recommendations.map(item => `- ${item}`)
+			: ['- No immediate actions recommended.'];
+
+		const riskLines = this.createMarkdownRiskSection(riskSummary);
+
+		const sections: string[] = [
+			`# IssueTriage Assessment · ${repository} #${issue.number} – ${issue.title}`,
+			`_Generated ${new Date().toISOString()}_`,
+			'',
+			'## Issue Metadata',
+			...metadataLines,
+			'',
+			'## Readiness',
+			`**${readiness.label}** (Composite ${record.compositeScore.toFixed(1)})`
+		];
+		if (readiness.description) {
+			sections.push(readiness.description);
+		}
+		sections.push('', ...tableLines, '', `Model: ${record.model}`, `Assessment Run: ${assessedAt}`, '', '## Summary', record.summary || 'No summary provided.', '', '## Recommendations', ...recommendationLines, '', ...riskLines, '', '## References', `- Issue: ${issue.url}`);
+
+		if (commentUrl) {
+			sections.push(`- Latest comment: ${commentUrl}`);
+		}
+
+		return sections.join('\n');
+	}
+
+	private createMarkdownRiskSection(riskSummary: RiskSummary | undefined): string[] {
+		if (!riskSummary) {
+			return ['## Risk Insights', 'No risk intelligence captured yet.'];
+		}
+		switch (riskSummary.status) {
+			case 'pending':
+				return ['## Risk Insights', 'Risk signals are still being collected for this issue.'];
+			case 'error':
+				return ['## Risk Insights', `Unable to load risk insights: ${riskSummary.message ?? 'An unexpected error occurred.'}`];
+			case 'skipped':
+				return ['## Risk Insights', riskSummary.message ?? 'Risk analysis was skipped for this issue.'];
+			case 'ready':
+				return this.buildReadyRiskLines(riskSummary);
+			default:
+				return ['## Risk Insights', 'Risk status unknown.'];
+		}
+	}
+
+	private buildReadyRiskLines(summary: RiskSummary): string[] {
+		const level = summary.riskLevel ?? 'low';
+		const levelLabel = level.charAt(0).toUpperCase() + level.slice(1);
+		const scoreText = typeof summary.riskScore === 'number' ? summary.riskScore.toFixed(0) : 'n/a';
+		const lines = [
+			'## Risk Insights',
+			`**${levelLabel} Risk** (Score ${scoreText})`,
+		];
+		if (summary.stale) {
+			lines.push('Signals are refreshing; data may be stale.');
+		}
+		if (summary.calculatedAt) {
+			lines.push(`Calculated: ${this.formatIsoDate(summary.calculatedAt)}`);
+		}
+		if (summary.metrics) {
+			lines.push('', '### Key Metrics');
+			lines.push(`- Linked pull requests: ${summary.metrics.prCount}`);
+			lines.push(`- Files touched: ${summary.metrics.filesTouched}`);
+			lines.push(`- Total lines changed: ${summary.metrics.changeVolume}`);
+			lines.push(`- Review signals: ${summary.metrics.reviewCommentCount}`);
+		}
+		if (summary.topDrivers && summary.topDrivers.length) {
+			lines.push('', '### Risk Drivers');
+			summary.topDrivers.forEach(item => {
+				lines.push(`- ${item}`);
+			});
+		}
+		return lines;
+	}
+
+	private createJsonExport(
+		repository: string,
+		issue: IssueSummary,
+		record: AssessmentRecord,
+		readiness: { key?: string; label: string; description?: string },
+		riskSummary: RiskSummary | undefined
+	): string {
+		const payload: Record<string, unknown> = {
+			generatedAt: new Date().toISOString(),
+			repository,
+			issue: {
+				number: issue.number,
+				title: issue.title,
+				url: issue.url,
+				state: issue.state,
+				labels: issue.labels,
+				assignees: issue.assignees,
+				milestone: issue.milestone ?? null,
+				updatedAt: this.formatIsoDate(issue.updatedAt)
+			},
+			assessment: {
+				compositeScore: record.compositeScore,
+				requirementsScore: record.requirementsScore,
+				complexityScore: record.complexityScore,
+				securityScore: record.securityScore,
+				businessScore: record.businessScore,
+				recommendations: record.recommendations,
+				summary: record.summary,
+				model: record.model,
+				createdAt: this.formatIsoDate(record.createdAt),
+				commentUrl: this.buildCommentUrl(record) ?? null
+			}
+		};
+		if (readiness.key) {
+			payload.readiness = {
+				key: readiness.key,
+				label: readiness.label,
+				description: readiness.description ?? null
+			};
+		}
+		if (riskSummary) {
+			payload.risk = {
+				status: riskSummary.status,
+				riskLevel: riskSummary.riskLevel ?? null,
+				riskScore: riskSummary.riskScore ?? null,
+				calculatedAt: riskSummary.calculatedAt ? this.formatIsoDate(riskSummary.calculatedAt) : null,
+				topDrivers: riskSummary.topDrivers ?? [],
+				metrics: riskSummary.metrics ?? null,
+				stale: Boolean(riskSummary.stale),
+				message: riskSummary.message ?? null
+			};
+		}
+		return JSON.stringify(payload, null, 2);
+	}
+
+	private formatIsoDate(value: string | undefined): string {
+		if (!value) {
+			return 'n/a';
+		}
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) {
+			return value;
+		}
+		return date.toISOString();
 	}
 
 	private postAssessment(record: AssessmentRecord): void {

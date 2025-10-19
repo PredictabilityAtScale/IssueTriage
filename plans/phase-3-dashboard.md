@@ -42,7 +42,7 @@
 1. ✅ **Data Layer Complete** – services expose necessary aggregates and history APIs; unit tests cover aggregation logic.
 2. ✅ **UI Shell Implemented** – new dashboard layout renders with placeholder data, navigation works.
 3. ✅ **Interactive Filters & Overview KPIs** – live wired data, readiness distribution chart operational.
-4. ✅ **Detail pane with History** – timeline functioning with trend indicators and visual markers; export actions pending.
+4. ✅ **Detail pane with History & Export** – timeline and export actions functioning with trend indicators and Markdown/JSON outputs; telemetry pending.
 5. **Accessibility & Quality Pass** – keyboard navigation, focus management, color contrast, snapshot tests/visual regression check.
 
 ## Risks & Mitigations
@@ -52,7 +52,5 @@
 - **Export accuracy**: include unit tests validating Markdown/JSON output schemas.
 
 ## Next Steps
-- Review plan with stakeholders; align on priorities (KPI set, export formats).
-- Draft technical design for `AssessmentHistoryService` and webview state store.
-- Create implementation tickets grouped by workstream and milestone.
-- Begin with data services and state contract to unblock UI work.
+- Instrument telemetry for dashboard interactions (filters, exports, tab changes).
+- Complete accessibility & quality pass (keyboard navigation, color contrast, snapshot tests).

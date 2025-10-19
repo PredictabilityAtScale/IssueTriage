@@ -258,6 +258,14 @@
 			if (commentUrl) {
 				vscodeApi.postMessage({ type: 'webview.openUrl', url: commentUrl });
 			}
+		} else if (action === 'exportMarkdown') {
+			if (typeof selectedIssueNumber === 'number') {
+				vscodeApi.postMessage({ type: 'webview.exportAssessment', issueNumber: selectedIssueNumber, format: 'markdown' });
+			}
+		} else if (action === 'exportJson') {
+			if (typeof selectedIssueNumber === 'number') {
+				vscodeApi.postMessage({ type: 'webview.exportAssessment', issueNumber: selectedIssueNumber, format: 'json' });
+			}
 		}
 	});
 
@@ -693,10 +701,11 @@
 				description: 'Display issues across every automation readiness tier.'
 			};
 		}
-		const definition = READINESS_DEFINITIONS[key];
+		const readinessKey = typeof key === 'string' ? /** @type {keyof typeof READINESS_DEFINITIONS | undefined} */ (key) : undefined;
+		const definition = readinessKey ? READINESS_DEFINITIONS[readinessKey] : undefined;
 		if (definition) {
 			return {
-				key,
+				key: readinessKey,
 				label: definition.label,
 				className: definition.className,
 				description: definition.description
@@ -780,6 +789,8 @@
 			'</div>',
 			'<div class="assessment-actions">'
 		];
+			lines.push('<button class="button-link" data-action="exportMarkdown">Export Markdown</button>');
+			lines.push('<button class="button-link" data-action="exportJson">Export JSON</button>');
 		if (issueUrl) {
 			lines.push('<button class="button-link" data-action="openIssue">Open Issue</button>');
 		}
