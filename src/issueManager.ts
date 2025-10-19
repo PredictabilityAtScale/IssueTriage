@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { GitHubAuthService, GitHubSessionMetadata } from './services/githubAuthService';
 import { GitHubClient, IssueFilters, IssueSummary, RepositorySummary } from './services/githubClient';
+import { AssessmentService } from './services/assessmentService';
+import type { AssessmentRecord } from './services/assessmentStorage';
 import { SettingsService } from './services/settingsService';
 import { StateService } from './services/stateService';
 import { TelemetryService } from './services/telemetryService';
@@ -32,6 +34,24 @@ interface GitRemote {
 export interface FilterState extends IssueFilters {
 	search?: string;
 	state?: 'open' | 'closed';
+	readiness?: AssessmentReadiness | 'all';
+}
+
+type AssessmentReadiness = 'ready' | 'prepare' | 'review' | 'manual';
+
+interface IssueAssessmentSummary {
+	issueNumber: number;
+	compositeScore: number;
+	readiness: AssessmentReadiness;
+	model: string;
+	updatedAt: string;
+}
+
+interface DashboardMetrics {
+	totalIssuesAssessed: number;
+	averageComposite?: number;
+	assessmentsLastSevenDays: number;
+	readinessDistribution: Record<AssessmentReadiness, number>;
 }
 
 interface IssueManagerState {
@@ -50,10 +70,16 @@ interface IssueManagerState {
 	session?: GitHubSessionMetadata;
 	automationLaunchEnabled: boolean;
 	riskSummaries: Record<number, RiskSummary>;
+	assessmentSummaries: Record<number, IssueAssessmentSummary>;
+	dashboardMetrics?: DashboardMetrics;
 }
 
 const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
 const WORKSPACE_FILTER_KEY = 'issuetriage.repository.filters';
+const DEFAULT_FILTERS: FilterState = {
+	state: 'open',
+	readiness: 'all'
+};
 
 export class IssueManager implements vscode.Disposable {
 	private readonly emitter = new vscode.EventEmitter<IssueManagerState>();
@@ -66,9 +92,10 @@ export class IssueManager implements vscode.Disposable {
 			assignees: [],
 			milestones: []
 		},
-		filters: {},
+		filters: { ...DEFAULT_FILTERS },
 		automationLaunchEnabled: false,
-		riskSummaries: {}
+		riskSummaries: {},
+		assessmentSummaries: {}
 	};
 	private allIssues: IssueSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
@@ -79,7 +106,8 @@ export class IssueManager implements vscode.Disposable {
 		private readonly settings: SettingsService,
 		private readonly stateService: StateService,
 		private readonly telemetry: TelemetryService,
-		private readonly risk: RiskIntelligenceService
+		private readonly risk: RiskIntelligenceService,
+		private readonly assessment: AssessmentService
 		) {
 		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
 		this.disposables.push(riskSubscription);
@@ -95,16 +123,12 @@ export class IssueManager implements vscode.Disposable {
 				this.state = { ...this.state, session };
 			}
 			const storedRepository = this.stateService.getWorkspace<RepositorySummary>(WORKSPACE_REPOSITORY_KEY);
-			const storedFilters = this.stateService.getWorkspace<FilterState>(WORKSPACE_FILTER_KEY, { state: 'open' });
+			const storedFilters = this.stateService.getWorkspace<FilterState>(WORKSPACE_FILTER_KEY, DEFAULT_FILTERS);
 			if (storedRepository) {
 				this.state.selectedRepository = storedRepository;
 				this.workspaceRepositorySlug = this.normalizeRepositorySlug(storedRepository.fullName);
 			}
-			if (storedFilters) {
-				this.state.filters = storedFilters;
-			} else {
-				this.state.filters = { state: 'open' };
-			}
+			this.state.filters = this.ensureFilterDefaults(storedFilters);
 			if (!storedRepository) {
 				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
 			}
@@ -149,8 +173,14 @@ export class IssueManager implements vscode.Disposable {
 		try {
 			const fullName = this.state.selectedRepository.fullName;
 			const filters = this.state.filters;
-			const issues = await this.github.listIssues(fullName, filters, forceRefresh);
+			const issues = await this.github.listIssues(fullName, {
+				label: filters.label,
+				assignee: filters.assignee,
+				milestone: filters.milestone,
+				state: filters.state
+			}, forceRefresh);
 			this.allIssues = issues;
+			await this.updateAssessmentData(fullName);
 			this.applyFilters();
 			await this.updateRiskSummaries(fullName);
 			this.state.lastUpdated = new Date().toISOString();
@@ -160,6 +190,24 @@ export class IssueManager implements vscode.Disposable {
 			this.handleUserFacingError('Failed to load issues from GitHub.', error);
 		} finally {
 			this.setLoading(false);
+		}
+	}
+
+	public async refreshAssessments(): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			return;
+		}
+		try {
+			await this.updateAssessmentData(repository);
+			this.applyFilters();
+			this.emitState();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.assessments.refreshFailed', {
+				repository,
+				message
+			});
 		}
 	}
 
@@ -210,9 +258,10 @@ export class IssueManager implements vscode.Disposable {
 	}
 
 	public async updateFilters(filters: FilterState): Promise<void> {
+		const normalized = this.ensureFilterDefaults(filters);
 		const previousState = this.state.filters.state;
-		this.state.filters = filters;
-		await this.stateService.updateWorkspace(WORKSPACE_FILTER_KEY, filters);
+		this.state.filters = normalized;
+		await this.stateService.updateWorkspace(WORKSPACE_FILTER_KEY, normalized);
 		
 		// If the state filter (open/closed) changed, we need to refetch from GitHub
 		if (previousState !== filters.state && this.state.selectedRepository) {
@@ -236,9 +285,11 @@ export class IssueManager implements vscode.Disposable {
 				assignees: [],
 				milestones: []
 			},
-			filters: {},
+			filters: { ...DEFAULT_FILTERS },
 			automationLaunchEnabled: this.readAutomationFlag(),
-			riskSummaries: {}
+			riskSummaries: {},
+			assessmentSummaries: {},
+			dashboardMetrics: undefined
 		};
 		this.allIssues = [];
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, undefined);
@@ -303,6 +354,84 @@ export class IssueManager implements vscode.Disposable {
 		}
 	}
 
+	private async updateAssessmentData(repository: string): Promise<void> {
+		const summaries: Record<number, IssueAssessmentSummary> = {};
+		const readinessDistribution: Record<AssessmentReadiness, number> = {
+			ready: 0,
+			prepare: 0,
+			review: 0,
+			manual: 0
+		};
+		let totalIssuesAssessed = 0;
+		let compositeAccumulator = 0;
+		let assessmentsLastSevenDays = 0;
+		const now = Date.now();
+
+		const historyResults = await Promise.all(this.allIssues.map(async issue => {
+			try {
+				const history = await this.assessment.getAssessmentHistory(repository, issue.number, 10);
+				return { issueNumber: issue.number, history };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.telemetry.trackEvent('issueManager.assessments.historyFailed', {
+					repository,
+					issue: String(issue.number),
+					message
+				});
+				return { issueNumber: issue.number, history: [] as AssessmentRecord[] };
+			}
+		}));
+
+		for (const result of historyResults) {
+			if (!result.history.length) {
+				continue;
+			}
+			totalIssuesAssessed += 1;
+			const latest = result.history[0];
+			const readiness = this.toReadiness(latest.compositeScore);
+			readinessDistribution[readiness] += 1;
+			compositeAccumulator += latest.compositeScore;
+			summaries[result.issueNumber] = {
+				issueNumber: result.issueNumber,
+				compositeScore: latest.compositeScore,
+				readiness,
+				model: latest.model,
+				updatedAt: latest.createdAt
+			};
+			for (const record of result.history) {
+				const created = Date.parse(record.createdAt);
+				if (Number.isFinite(created) && now - created <= 7 * 24 * 60 * 60 * 1000) {
+					assessmentsLastSevenDays += 1;
+				}
+			}
+		}
+
+		const averageComposite = totalIssuesAssessed > 0
+			? Number((compositeAccumulator / totalIssuesAssessed).toFixed(1))
+			: undefined;
+
+		this.state.assessmentSummaries = summaries;
+		this.state.dashboardMetrics = {
+			totalIssuesAssessed,
+			averageComposite,
+			assessmentsLastSevenDays,
+			readinessDistribution
+		};
+	}
+
+	private toReadiness(score: number): AssessmentReadiness {
+		if (score >= 80) {
+			return 'ready';
+		}
+		if (score >= 60) {
+			return 'prepare';
+		}
+		if (score >= 40) {
+			return 'review';
+		}
+		return 'manual';
+	}
+
 	private applyFilters(): void {
 		const { filters } = this.state;
 		let filtered = [...this.allIssues];
@@ -318,6 +447,12 @@ export class IssueManager implements vscode.Disposable {
 		}
 		if (filters.milestone) {
 			filtered = filtered.filter(issue => issue.milestone === filters.milestone);
+		}
+		if (filters.readiness && filters.readiness !== 'all') {
+			filtered = filtered.filter(issue => {
+				const summary = this.state.assessmentSummaries[issue.number];
+				return summary ? summary.readiness === filters.readiness : false;
+			});
 		}
 
 		this.state.issues = filtered;
@@ -364,8 +499,24 @@ export class IssueManager implements vscode.Disposable {
 		this.emitter.fire({
 			...this.state,
 			issues: [...this.state.issues],
-			riskSummaries: { ...this.state.riskSummaries }
+			riskSummaries: { ...this.state.riskSummaries },
+			assessmentSummaries: { ...this.state.assessmentSummaries },
+			dashboardMetrics: this.state.dashboardMetrics
+				? {
+					...this.state.dashboardMetrics,
+					readinessDistribution: { ...this.state.dashboardMetrics.readinessDistribution }
+				}
+				: undefined
 		});
+	}
+
+	private ensureFilterDefaults(filters?: FilterState): FilterState {
+		return {
+			...DEFAULT_FILTERS,
+			...filters,
+			readiness: filters?.readiness ?? DEFAULT_FILTERS.readiness,
+			state: filters?.state ?? DEFAULT_FILTERS.state
+		};
 	}
 
 	private readAutomationFlag(): boolean {

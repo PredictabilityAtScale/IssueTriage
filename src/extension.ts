@@ -62,7 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const riskStorage = new RiskStorage(context.globalStorageUri.fsPath);
 	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry);
 	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk);
-	const issueManager = new IssueManager(auth, github, services.settings, services.state, services.telemetry, risk);
+	const issueManager = new IssueManager(auth, github, services.settings, services.state, services.telemetry, risk, assessment);
 	services.auth = auth;
 	services.github = github;
 	services.issueManager = issueManager;
@@ -397,6 +397,10 @@ class IssueTriagePanel {
 			min-width: 280px;
 		}
 
+		.filter-group.readiness-group {
+			min-width: 180px;
+		}
+
 		.repo-controls {
 			display: flex;
 			gap: 8px;
@@ -444,6 +448,90 @@ class IssueTriagePanel {
 				flex-direction: column;
 				gap: 12px;
 				position: relative;
+			}
+
+			.overview-grid {
+				display: grid;
+				gap: 12px;
+				grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			}
+
+			.overview-card {
+				border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				border-radius: 6px;
+				padding: 12px;
+				background: color-mix(in srgb, var(--vscode-editor-background) 93%, var(--vscode-button-background) 7%);
+			}
+
+			.overview-card h3 {
+				margin: 0;
+				font-size: 13px;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+			}
+
+			.overview-value {
+				font-size: 24px;
+				font-weight: 600;
+				margin: 8px 0 4px;
+			}
+
+			.overview-subtitle {
+				margin: 0;
+				font-size: 12px;
+				color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+			}
+
+			.overview-empty {
+				border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				border-radius: 6px;
+				padding: 16px;
+				text-align: center;
+				color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+			}
+
+			.overview-readiness .readiness-distribution {
+				list-style: none;
+				margin: 12px 0 0;
+				padding: 0;
+				display: grid;
+				gap: 8px;
+			}
+
+			.readiness-distribution li {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 8px;
+				font-size: 12px;
+			}
+
+			.readiness-label {
+				flex: 1;
+			}
+
+			.readiness-dot {
+				width: 10px;
+				height: 10px;
+				border-radius: 999px;
+				display: inline-block;
+			}
+
+			.readiness-dot.readiness-ready {
+				background: rgba(46, 160, 67, 0.8);
+			}
+
+			.readiness-dot.readiness-prepare {
+				background: rgba(187, 128, 9, 0.8);
+			}
+
+			.readiness-dot.readiness-review {
+				background: rgba(229, 140, 33, 0.8);
+			}
+
+			.readiness-dot.readiness-manual {
+				background: rgba(229, 83, 75, 0.8);
 			}
 
 			.loading-state {
@@ -575,6 +663,12 @@ class IssueTriagePanel {
 					display: flex;
 					align-items: center;
 					gap: 6px;
+					flex-wrap: wrap;
+					justify-content: flex-end;
+				}
+
+				.issue-card-actions .issue-action {
+					margin-left: auto;
 				}
 
 				.issue-action {
@@ -608,6 +702,11 @@ class IssueTriagePanel {
 				padding: 2px 6px;
 				border-radius: 999px;
 				background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-button-background) 15%);
+			}
+
+			.composite-badge {
+				background: color-mix(in srgb, var(--vscode-button-background) 25%, transparent 75%);
+				border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
 			}
 
 			.state-badge {
@@ -848,6 +947,10 @@ class IssueTriagePanel {
 					<span class="filter-label">Milestone</span>
 					<select id="milestoneFilter"></select>
 				</div>
+				<div class="filter-group readiness-group">
+					<span class="filter-label">Readiness</span>
+					<select id="readinessFilter"></select>
+				</div>
 			</div>
 			<div class="state-tabs">
 				<button class="state-tab active" id="openTab">Open</button>
@@ -856,6 +959,7 @@ class IssueTriagePanel {
 			<div class="container">
 				<div class="issue-list-panel">
 					<div id="issueSummary" class="meta-row"></div>
+					<section id="overviewMetrics" class="overview-grid" aria-live="polite"></section>
 					<section id="issueList" class="issue-list"></section>
 					<div id="loadingState" class="loading-state" hidden role="status" aria-live="polite">
 						<div class="loading-spinner" aria-hidden="true"></div>
