@@ -73,6 +73,8 @@
 	let selectedIssueNumber = undefined;
 	/** @type {any} */
 	let latestAssessment = null;
+	/** @type {any[]} */
+	let assessmentHistory = [];
 	let currentStateFilter = 'open';
 	/** @type {number | undefined} */
 	let searchDebounceHandle = undefined;
@@ -105,6 +107,15 @@
 				if (message.issueNumber === selectedIssueNumber) {
 					renderAssessmentError(typeof message.message === 'string' ? message.message : 'Unable to load assessment.');
 				}
+				break;
+			case 'assessment.history':
+				if (message.issueNumber === selectedIssueNumber) {
+					assessmentHistory = Array.isArray(message.history) ? message.history : [];
+					renderAssessmentHistory();
+				}
+				break;
+			case 'assessment.historyError':
+				console.warn('[IssueTriage] Failed to load assessment history:', message.message);
 				break;
 			default:
 				break;
@@ -622,10 +633,12 @@
 		}
 		selectedIssueNumber = issueNumber;
 		latestAssessment = null;
+		assessmentHistory = [];
 		highlightSelectedIssue();
 		renderAssessmentLoading();
 		if (latestState && latestState.selectedRepository) {
 			vscodeApi.postMessage({ type: 'webview.selectIssue', issueNumber });
+			vscodeApi.postMessage({ type: 'webview.getAssessmentHistory', issueNumber });
 		}
 	}
 
@@ -774,8 +787,65 @@
 			lines.push('<button class="button-link" data-action="openComment" data-url="' + data.commentUrl + '">View Latest Comment</button>');
 		}
 		lines.push('</div>');
-		assessmentPanel.innerHTML = lines.join('') + '<div id="riskSection"></div>';
+		assessmentPanel.innerHTML = lines.join('') + '<div id="riskSection"></div><div id="historySection"></div>';
 		renderRiskDisplay(data.issueNumber);
+		renderAssessmentHistory();
+	}
+
+	function renderAssessmentHistory() {
+		const container = assessmentPanel.querySelector('#historySection');
+		if (!container) {
+			return;
+		}
+		if (!assessmentHistory || assessmentHistory.length === 0) {
+			container.innerHTML = '';
+			return;
+		}
+		const items = assessmentHistory.map((/** @param {any} record */ record, /** @param {any} index */ index) => {
+			const isLatest = index === 0;
+			const readiness = getReadiness(record.compositeScore);
+			const timestamp = new Date(record.createdAt).toLocaleString();
+			const latestClass = isLatest ? ' latest' : '';
+			let trendHtml = '';
+			if (index < assessmentHistory.length - 1) {
+				const previous = assessmentHistory[index + 1];
+				const diff = record.compositeScore - previous.compositeScore;
+				if (Math.abs(diff) >= 1) {
+					const direction = diff > 0 ? 'up' : 'down';
+					const symbol = diff > 0 ? '▲' : '▼';
+					trendHtml = '<span class="history-trend ' + direction + '">' + symbol + ' ' + Math.abs(diff).toFixed(1) + '</span>';
+				}
+			}
+			return '<article class="history-item' + latestClass + '">' +
+				'<div class="history-header">' +
+					'<span class="readiness-pill ' + readiness.className + '">' + readiness.label + '</span>' +
+					'<span class="history-timestamp">' + timestamp + '</span>' +
+				'</div>' +
+				'<div class="history-scores">' +
+					'<div class="history-score">' +
+						'<div class="history-score-label">Composite</div>' +
+						'<div class="history-score-value">' + record.compositeScore.toFixed(1) + trendHtml + '</div>' +
+					'</div>' +
+					'<div class="history-score">' +
+						'<div class="history-score-label">Req.</div>' +
+						'<div class="history-score-value">' + record.requirementsScore.toFixed(1) + '</div>' +
+					'</div>' +
+					'<div class="history-score">' +
+						'<div class="history-score-label">Complex.</div>' +
+						'<div class="history-score-value">' + record.complexityScore.toFixed(1) + '</div>' +
+					'</div>' +
+					'<div class="history-score">' +
+						'<div class="history-score-label">Security</div>' +
+						'<div class="history-score-value">' + record.securityScore.toFixed(1) + '</div>' +
+					'</div>' +
+					'<div class="history-score">' +
+						'<div class="history-score-label">Business</div>' +
+						'<div class="history-score-value">' + record.businessScore.toFixed(1) + '</div>' +
+					'</div>' +
+				'</div>' +
+			'</article>';
+		}).join('');
+		container.innerHTML = '<div class="assessment-history"><h4>Assessment History</h4><div class="history-timeline">' + items + '</div></div>';
 	}
 
 	vscodeApi.postMessage({ type: 'webview.ready' });

@@ -39,10 +39,10 @@
 - Add debug logging when state payloads exceed thresholds to guard against performance issues.
 
 ## Deliverables & Milestones
-1. **Data Layer Complete** – services expose necessary aggregates and history APIs; unit tests cover aggregation logic.
-2. **UI Shell Implemented** – new dashboard layout renders with placeholder data, navigation works.
-3. **Interactive Filters & Overview KPIs** – live wired data, readiness distribution chart operational.
-4. **Detail pane with History & Export** – timeline and export actions functioning, telemetry events firing.
+1. ✅ **Data Layer Complete** – services expose necessary aggregates and history APIs; unit tests cover aggregation logic.
+2. ✅ **UI Shell Implemented** – new dashboard layout renders with placeholder data, navigation works.
+3. ✅ **Interactive Filters & Overview KPIs** – live wired data, readiness distribution chart operational.
+4. ✅ **Detail pane with History** – timeline functioning with trend indicators and visual markers; export actions pending.
 5. **Accessibility & Quality Pass** – keyboard navigation, focus management, color contrast, snapshot tests/visual regression check.
 
 ## Risks & Mitigations

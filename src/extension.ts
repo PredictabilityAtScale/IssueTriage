@@ -907,6 +907,117 @@ class IssueTriagePanel {
 					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 					margin: 4px 0;
 				}
+
+				.assessment-history {
+					margin-top: 24px;
+				}
+
+				.assessment-history h4 {
+					margin: 0 0 12px;
+					font-size: 14px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.history-timeline {
+					position: relative;
+					padding-left: 28px;
+					margin-top: 12px;
+				}
+
+				.history-timeline::before {
+					content: '';
+					position: absolute;
+					left: 8px;
+					top: 0;
+					bottom: 0;
+					width: 2px;
+					background: var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				}
+
+				.history-item {
+					position: relative;
+					margin-bottom: 20px;
+					padding: 12px;
+					border-radius: 6px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: var(--vscode-editor-background);
+				}
+
+				.history-item::before {
+					content: '';
+					position: absolute;
+					left: -24px;
+					top: 16px;
+					width: 10px;
+					height: 10px;
+					border-radius: 50%;
+					background: var(--vscode-button-background);
+					border: 2px solid var(--vscode-editor-background);
+				}
+
+				.history-item.latest::before {
+					background: var(--vscode-testing-iconPassed, #2ea043);
+				}
+
+				.history-header {
+					display: flex;
+					justify-content: space-between;
+					align-items: center;
+					margin-bottom: 8px;
+				}
+
+				.history-timestamp {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.history-scores {
+					display: grid;
+					grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+					gap: 8px;
+					margin-top: 8px;
+				}
+
+				.history-score {
+					text-align: center;
+					padding: 6px;
+					border-radius: 4px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 93%, var(--vscode-button-background) 7%);
+				}
+
+				.history-score-label {
+					font-size: 10px;
+					text-transform: uppercase;
+					letter-spacing: 0.05em;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.history-score-value {
+					font-size: 16px;
+					font-weight: 600;
+					margin-top: 2px;
+				}
+
+				.history-trend {
+					font-size: 11px;
+					margin-left: 4px;
+				}
+
+				.history-trend.up {
+					color: var(--vscode-testing-iconPassed, #2ea043);
+				}
+
+				.history-trend.down {
+					color: rgba(229, 83, 75, 0.95);
+				}
+
+				.history-empty {
+					padding: 16px;
+					text-align: center;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+				}
 			</style>`;
 	}
 
@@ -1008,6 +1119,19 @@ class IssueTriagePanel {
 				await this.sendLatestAssessment(repository, issueNumber);
 				break;
 			}
+			case 'webview.getAssessmentHistory': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				if (issueNumber === undefined) {
+					break;
+				}
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName;
+				if (!repository) {
+					break;
+				}
+				await this.sendAssessmentHistory(repository, issueNumber);
+				break;
+			}
 			case 'webview.filtersChanged':
 				await this.services.issueManager.updateFilters(this.ensureFilterPayload(message.filters));
 				break;
@@ -1094,6 +1218,24 @@ class IssueTriagePanel {
 				type: 'assessment.error',
 				issueNumber,
 				message: formatAssessmentError(error)
+			});
+		}
+	}
+
+	private async sendAssessmentHistory(repository: string, issueNumber: number): Promise<void> {
+		try {
+			const records = await this.services.assessment.getAssessmentHistory(repository, issueNumber, 20);
+			const history = records.map(record => this.toWebviewAssessment(record));
+			this.panel.webview.postMessage({
+				type: 'assessment.history',
+				issueNumber,
+				history
+			});
+		} catch (error) {
+			this.panel.webview.postMessage({
+				type: 'assessment.historyError',
+				issueNumber,
+				message: error instanceof Error ? error.message : 'Unable to load assessment history.'
 			});
 		}
 	}
