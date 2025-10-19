@@ -24,6 +24,7 @@
 	const milestoneFilter = /** @type {HTMLSelectElement} */ (requireElement('milestoneFilter'));
 	const readinessFilter = /** @type {HTMLSelectElement} */ (requireElement('readinessFilter'));
 	const issueList = /** @type {HTMLElement} */ (requireElement('issueList'));
+	issueList.setAttribute('aria-multiselectable', 'false');
 	const emptyState = /** @type {HTMLElement} */ (requireElement('emptyState'));
 	const issueSummary = /** @type {HTMLElement} */ (requireElement('issueSummary'));
 	const loadingState = /** @type {HTMLElement} */ (requireElement('loadingState'));
@@ -33,6 +34,7 @@
 	const overviewMetrics = /** @type {HTMLElement} */ (requireElement('overviewMetrics'));
 	const openTab = /** @type {HTMLButtonElement} */ (requireElement('openTab'));
 	const closedTab = /** @type {HTMLButtonElement} */ (requireElement('closedTab'));
+
 
 	const READINESS_OPTIONS = [
 		{ value: 'all', label: 'All readiness states' },
@@ -188,8 +190,11 @@
 	});
 
 	function updateStateTabs() {
-		openTab.classList.toggle('active', currentStateFilter === 'open');
-		closedTab.classList.toggle('active', currentStateFilter === 'closed');
+		const openSelected = currentStateFilter === 'open';
+		openTab.classList.toggle('active', openSelected);
+		openTab.setAttribute('aria-pressed', openSelected ? 'true' : 'false');
+		closedTab.classList.toggle('active', !openSelected);
+		closedTab.setAttribute('aria-pressed', openSelected ? 'false' : 'true');
 	}
 
 	issueList.addEventListener('click', event => {
@@ -204,7 +209,7 @@
 			if (action === 'runAssessment' && Number.isFinite(issueNumber)) {
 				event.preventDefault();
 				event.stopPropagation();
-				selectIssue(issueNumber);
+				selectIssue(issueNumber, false);
 				vscodeApi.postMessage({ type: 'webview.runAssessment', issueNumber });
 			}
 			return;
@@ -217,8 +222,10 @@
 		if (Number.isNaN(issueNumber)) {
 			return;
 		}
-		selectIssue(issueNumber);
+		selectIssue(issueNumber, true);
 	});
+
+	issueList.addEventListener('keydown', handleIssueListKeydown);
 
 	issueList.addEventListener('dblclick', event => {
 		if (!(event.target instanceof HTMLElement)) {
@@ -238,6 +245,87 @@
 			vscodeApi.postMessage({ type: 'webview.openIssue', url });
 		}
 	});
+
+	/**
+	 * @param {KeyboardEvent} event
+	 */
+	function handleIssueListKeydown(event) {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const card = event.target.closest('.issue-card');
+		if (!card) {
+			return;
+		}
+		switch (event.key) {
+			case 'ArrowDown':
+				event.preventDefault();
+				moveSelection(1);
+				break;
+			case 'ArrowUp':
+				event.preventDefault();
+				moveSelection(-1);
+				break;
+			case 'Home':
+				event.preventDefault();
+				selectIssueAtIndex(0, true);
+				break;
+			case 'End':
+				event.preventDefault();
+				selectIssueAtIndex(getIssueCards().length - 1, true);
+				break;
+			case 'Enter':
+			case ' ': {
+				event.preventDefault();
+				const issueNumber = Number(card.getAttribute('data-issue-number'));
+				if (!Number.isNaN(issueNumber)) {
+					selectIssue(issueNumber, true);
+				}
+				break;
+			}
+			default:
+				break;
+		}
+	}
+
+	/**
+	 * @returns {HTMLElement[]}
+	 */
+	function getIssueCards() {
+		return /** @type {HTMLElement[]} */ (Array.from(issueList.querySelectorAll('.issue-card')));
+	}
+
+	/**
+	 * @param {number} index
+	 * @param {boolean} focusCard
+	 */
+	function selectIssueAtIndex(index, focusCard) {
+		const cards = getIssueCards();
+		if (!cards.length) {
+			return;
+		}
+		const boundedIndex = Math.max(0, Math.min(index, cards.length - 1));
+		const targetCard = cards[boundedIndex];
+		const issueNumber = Number(targetCard.getAttribute('data-issue-number'));
+		if (!Number.isNaN(issueNumber)) {
+			selectIssue(issueNumber, focusCard);
+		}
+	}
+
+	/**
+	 * @param {number} offset
+	 */
+	function moveSelection(offset) {
+		const cards = getIssueCards();
+		if (!cards.length) {
+			return;
+		}
+		const currentIndex = cards.findIndex(card => Number(card.getAttribute('data-issue-number')) === selectedIssueNumber);
+		const nextIndex = currentIndex === -1
+			? (offset > 0 ? 0 : cards.length - 1)
+			: Math.max(0, Math.min(currentIndex + offset, cards.length - 1));
+		selectIssueAtIndex(nextIndex, true);
+	}
 
 	assessmentPanel.addEventListener('click', event => {
 		if (!(event.target instanceof HTMLElement)) {
@@ -318,8 +406,8 @@
 		const nextStateFilter = filters.state || 'open';
 		if (currentStateFilter !== nextStateFilter) {
 			currentStateFilter = nextStateFilter;
-			updateStateTabs();
 		}
+		updateStateTabs();
 
 		searchInput.value = filters.search || '';
 
@@ -347,6 +435,7 @@
 		if (!loading && issues.length === 0) {
 			emptyState.hidden = false;
 			issueList.innerHTML = '';
+			issueList.removeAttribute('aria-activedescendant');
 		} else {
 			emptyState.hidden = true;
 			issueList.innerHTML = issues.map(/** @param {any} issue */ issue => renderIssue(issue)).join('');
@@ -598,11 +687,14 @@
 		const badgeParts = [readinessBadge, compositeBadge, riskBadge, stateBadge].filter(Boolean);
 		const badgeHtml = badgeParts.join('');
 		const assessedText = assessmentSummary ? '· Assessed ' + new Date(assessmentSummary.updatedAt).toLocaleString() : '';
-		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3>#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + badgeHtml + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
+		const cardId = 'issue-card-' + issue.number;
+		const titleId = 'issue-title-' + issue.number;
+		const summaryId = 'issue-summary-' + issue.number;
+		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3 id="' + titleId + '">#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + badgeHtml + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
 		const labelRow = labelBadges ? '<div class="meta-row">' + labelBadges + '</div>' : '';
-		return '<article class="issue-card ' + stateClass + '" data-issue-number="' + issue.number + '" data-url="' + issue.url + '">' +
+		return '<article class="issue-card ' + stateClass + '" id="' + cardId + '" data-issue-number="' + issue.number + '" data-url="' + issue.url + '" role="option" aria-selected="false" tabindex="-1" aria-labelledby="' + titleId + '" aria-describedby="' + summaryId + '">' +
 			header +
-			'<div class="meta-row">' +
+			'<div class="meta-row" id="' + summaryId + '">' +
 				'<span>Updated ' + updatedText + '</span>' +
 				(assigneeText ? '<span>' + assigneeText + '</span>' : '') +
 				(milestoneText ? '<span>' + milestoneText + '</span>' : '') +
@@ -616,33 +708,41 @@
 		if (!latestState || !latestState.selectedRepository) {
 			selectedIssueNumber = undefined;
 			renderAssessmentEmpty('Connect to a repository to view assessments.');
+			issueList.removeAttribute('aria-activedescendant');
 			return;
 		}
 		if (!latestState.issues.length) {
 			selectedIssueNumber = undefined;
 			renderAssessmentEmpty('No assessments yet. Run an IssueTriage assessment to populate this panel.');
+			issueList.removeAttribute('aria-activedescendant');
 			return;
 		}
 		const existingNumbers = latestState.issues.map(/** @param {any} issue */ issue => issue.number);
 		if (!selectedIssueNumber || !existingNumbers.includes(selectedIssueNumber)) {
-			selectIssue(existingNumbers[0]);
+			selectIssue(existingNumbers[0], false);
 		} else {
-			highlightSelectedIssue();
+			const shouldRestoreFocus = issueList.contains(document.activeElement);
+			highlightSelectedIssue(shouldRestoreFocus);
 		}
 	}
 
 	/**
 	 * @param {any} issueNumber
 	 */
-	function selectIssue(issueNumber) {
+	/**
+	 * @param {number} issueNumber
+	 * @param {boolean} [focusCard]
+	 */
+	function selectIssue(issueNumber, focusCard = false) {
+		const shouldFocus = Boolean(focusCard);
 		if (selectedIssueNumber === issueNumber) {
-			highlightSelectedIssue();
+			highlightSelectedIssue(shouldFocus);
 			return;
 		}
 		selectedIssueNumber = issueNumber;
 		latestAssessment = null;
 		assessmentHistory = [];
-		highlightSelectedIssue();
+		highlightSelectedIssue(shouldFocus);
 		renderAssessmentLoading();
 		if (latestState && latestState.selectedRepository) {
 			vscodeApi.postMessage({ type: 'webview.selectIssue', issueNumber });
@@ -650,16 +750,37 @@
 		}
 	}
 
-	function highlightSelectedIssue() {
-		const cards = issueList.querySelectorAll('.issue-card');
+	/**
+	 * @param {boolean} focusCard
+	 */
+	function highlightSelectedIssue(focusCard) {
+		const cards = /** @type {HTMLElement[]} */ (Array.from(issueList.querySelectorAll('.issue-card')));
+		let focusTarget = /** @type {HTMLElement | null} */ (null);
 		cards.forEach(card => {
 			const number = Number(card.getAttribute('data-issue-number'));
-			if (!Number.isNaN(number) && number === selectedIssueNumber) {
-				card.classList.add('selected');
-			} else {
-				card.classList.remove('selected');
+			const isSelected = !Number.isNaN(number) && number === selectedIssueNumber;
+			card.classList.toggle('selected', isSelected);
+			card.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+			card.tabIndex = isSelected ? 0 : -1;
+			if (isSelected) {
+				focusTarget = card;
 			}
 		});
+		if (focusTarget) {
+			const targetId = focusTarget.getAttribute('id');
+			if (targetId) {
+				issueList.setAttribute('aria-activedescendant', targetId);
+			}
+			if (focusCard) {
+				try {
+					focusTarget.focus({ preventScroll: true });
+				} catch (error) {
+					focusTarget.focus();
+				}
+			}
+		} else {
+			issueList.removeAttribute('aria-activedescendant');
+		}
 	}
 
 	/**
@@ -789,13 +910,13 @@
 			'</div>',
 			'<div class="assessment-actions">'
 		];
-			lines.push('<button class="button-link" data-action="exportMarkdown">Export Markdown</button>');
-			lines.push('<button class="button-link" data-action="exportJson">Export JSON</button>');
+			lines.push('<button class="button-link" type="button" data-action="exportMarkdown">Export Markdown</button>');
+			lines.push('<button class="button-link" type="button" data-action="exportJson">Export JSON</button>');
 		if (issueUrl) {
-			lines.push('<button class="button-link" data-action="openIssue">Open Issue</button>');
+			lines.push('<button class="button-link" type="button" data-action="openIssue">Open Issue</button>');
 		}
 		if (data.commentUrl) {
-			lines.push('<button class="button-link" data-action="openComment" data-url="' + data.commentUrl + '">View Latest Comment</button>');
+			lines.push('<button class="button-link" type="button" data-action="openComment" data-url="' + data.commentUrl + '">View Latest Comment</button>');
 		}
 		lines.push('</div>');
 		assessmentPanel.innerHTML = lines.join('') + '<div id="riskSection"></div><div id="historySection"></div>';
@@ -827,7 +948,7 @@
 					trendHtml = '<span class="history-trend ' + direction + '">' + symbol + ' ' + Math.abs(diff).toFixed(1) + '</span>';
 				}
 			}
-			return '<article class="history-item' + latestClass + '">' +
+			return '<li class="history-item' + latestClass + '" role="listitem">' +
 				'<div class="history-header">' +
 					'<span class="readiness-pill ' + readiness.className + '">' + readiness.label + '</span>' +
 					'<span class="history-timestamp">' + timestamp + '</span>' +
@@ -854,9 +975,9 @@
 						'<div class="history-score-value">' + record.businessScore.toFixed(1) + '</div>' +
 					'</div>' +
 				'</div>' +
-			'</article>';
+			'</li>';
 		}).join('');
-		container.innerHTML = '<div class="assessment-history"><h4>Assessment History</h4><div class="history-timeline">' + items + '</div></div>';
+		container.innerHTML = '<div class="assessment-history"><h4>Assessment History</h4><ol class="history-timeline" role="list">' + items + '</ol></div>';
 	}
 
 	vscodeApi.postMessage({ type: 'webview.ready' });

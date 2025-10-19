@@ -42,8 +42,9 @@
 1. ✅ **Data Layer Complete** – services expose necessary aggregates and history APIs; unit tests cover aggregation logic.
 2. ✅ **UI Shell Implemented** – new dashboard layout renders with placeholder data, navigation works.
 3. ✅ **Interactive Filters & Overview KPIs** – live wired data, readiness distribution chart operational.
-4. ✅ **Detail pane with History & Export** – timeline and export actions functioning with trend indicators and Markdown/JSON outputs; telemetry pending.
-5. **Accessibility & Quality Pass** – keyboard navigation, focus management, color contrast, snapshot tests/visual regression check.
+4. ✅ **Detail pane with History & Export** – timeline and export actions functioning with trend indicators and Markdown/JSON outputs.
+5. ✅ **Telemetry & Observability** – dashboard instrumentation for repository selection, filter changes, issue selection, and export usage.
+6. ✅ **Accessibility & Quality Pass** – keyboard navigation, list focus management, high-contrast updates, and regression checks for the dashboard webview.
 
 ## Risks & Mitigations
 - **Complexity of webview state**: adopt typed interfaces and central store to avoid inconsistent updates.
@@ -52,5 +53,4 @@
 - **Export accuracy**: include unit tests validating Markdown/JSON output schemas.
 
 ## Next Steps
-- Instrument telemetry for dashboard interactions (filters, exports, tab changes).
-- Complete accessibility & quality pass (keyboard navigation, color contrast, snapshot tests).
+- Monitor dashboard accessibility in user telemetry and schedule periodic audits for new UI additions.

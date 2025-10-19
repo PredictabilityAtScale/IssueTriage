@@ -247,6 +247,10 @@ export class IssueManager implements vscode.Disposable {
 		if (!repository) {
 			throw new Error(`Repository ${fullName} not found in cache.`);
 		}
+		this.telemetry.trackEvent('dashboard.repositorySelected', {
+			repository: repository.fullName,
+			visibility: repository.private ? 'private' : 'public'
+		});
 		this.state.selectedRepository = repository;
 		this.workspaceRepositorySlug = this.normalizeRepositorySlug(repository.fullName);
 		this.state.riskSummaries = {};

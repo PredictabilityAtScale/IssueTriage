@@ -302,6 +302,18 @@ class IssueTriagePanel {
 					color: var(--vscode-editor-foreground);
 				}
 
+				.visually-hidden {
+					position: absolute;
+					width: 1px;
+					height: 1px;
+					padding: 0;
+					margin: -1px;
+					overflow: hidden;
+					clip: rect(0, 0, 0, 0);
+					white-space: nowrap;
+					border: 0;
+				}
+
 				.header {
 					display: flex;
 					align-items: center;
@@ -334,6 +346,19 @@ class IssueTriagePanel {
 					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
 					background: var(--vscode-editor-background);
 					color: inherit;
+					outline: none;
+				}
+
+				button:focus-visible,
+				select:focus-visible,
+				input[type="search"]:focus-visible,
+				.issue-card:focus-visible,
+				.issue-action:focus-visible,
+				.button-link:focus-visible,
+				.state-tab:focus-visible,
+				.compact-button:focus-visible {
+					outline: 2px solid var(--vscode-focusBorder, #0078d4);
+					outline-offset: 2px;
 				}
 
 				button.primary {
@@ -611,6 +636,11 @@ class IssueTriagePanel {
 			.issue-card.selected {
 				border-color: var(--vscode-button-background);
 				background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-button-background) 20%);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder, var(--vscode-button-background)) 80%, transparent 20%);
+			}
+
+			.issue-card:focus-visible {
+				border-color: var(--vscode-focusBorder, var(--vscode-button-background));
 			}
 
 			.issue-card.issue-state-closed {
@@ -924,6 +954,8 @@ class IssueTriagePanel {
 					position: relative;
 					padding-left: 28px;
 					margin-top: 12px;
+					margin-bottom: 0;
+					list-style: none;
 				}
 
 				.history-timeline::before {
@@ -1038,52 +1070,56 @@ class IssueTriagePanel {
 			</div>
 			<div class="filters-bar" aria-live="polite">
 				<div class="filter-group repo-group">
-					<span class="filter-label">Repository</span>
-					<div class="repo-controls">
-						<select id="repositorySelect"></select>
+					<label class="filter-label" id="repositoryLabel" for="repositorySelect">Repository</label>
+					<div class="repo-controls" role="group" aria-labelledby="repositoryLabel">
+						<select id="repositorySelect" aria-describedby="repositoryHelp"></select>
 						<button id="connect" class="compact-button">Connect</button>
 					</div>
+					<p id="repositoryHelp" class="visually-hidden">Select a repository to load issues for IssueTriage.</p>
 				</div>
 				<div class="filter-group search-group">
-					<span class="filter-label">Search</span>
+					<label class="filter-label" for="searchInput">Search</label>
 					<input type="search" id="searchInput" placeholder="Search titles" />
 				</div>
 				<div class="filter-group">
-					<span class="filter-label">Label</span>
+					<label class="filter-label" for="labelFilter">Label</label>
 					<select id="labelFilter"></select>
 				</div>
 				<div class="filter-group">
-					<span class="filter-label">Assignee</span>
+					<label class="filter-label" for="assigneeFilter">Assignee</label>
 					<select id="assigneeFilter"></select>
 				</div>
 				<div class="filter-group">
-					<span class="filter-label">Milestone</span>
+					<label class="filter-label" for="milestoneFilter">Milestone</label>
 					<select id="milestoneFilter"></select>
 				</div>
 				<div class="filter-group readiness-group">
-					<span class="filter-label">Readiness</span>
+					<label class="filter-label" for="readinessFilter">Readiness</label>
 					<select id="readinessFilter"></select>
 				</div>
 			</div>
-			<div class="state-tabs">
-				<button class="state-tab active" id="openTab">Open</button>
-				<button class="state-tab" id="closedTab">Closed</button>
+			<div class="state-tabs" role="group" aria-label="Issue state filter">
+				<button class="state-tab active" id="openTab" aria-pressed="true">Open</button>
+				<button class="state-tab" id="closedTab" aria-pressed="false">Closed</button>
 			</div>
 			<div class="container">
-				<div class="issue-list-panel">
-					<div id="issueSummary" class="meta-row"></div>
-					<section id="overviewMetrics" class="overview-grid" aria-live="polite"></section>
-					<section id="issueList" class="issue-list"></section>
+				<div class="issue-list-panel" aria-label="Issue list and overview">
+					<div id="issueSummary" class="meta-row" role="status" aria-live="polite"></div>
+					<h2 class="visually-hidden" id="overviewHeading">Overview metrics</h2>
+					<section id="overviewMetrics" class="overview-grid" aria-labelledby="overviewHeading" aria-live="polite"></section>
+					<h2 class="visually-hidden" id="issueListHeading">Issues</h2>
+					<section id="issueList" class="issue-list" role="listbox" aria-labelledby="issueListHeading"></section>
 					<div id="loadingState" class="loading-state" hidden role="status" aria-live="polite">
 						<div class="loading-spinner" aria-hidden="true"></div>
 						<p>Loading issues...</p>
 					</div>
-					<div id="emptyState" class="empty-state" hidden>
+					<div id="emptyState" class="empty-state" hidden role="status" aria-live="polite">
 						<p>No issues match your filters.</p>
 					</div>
 				</div>
-				<div class="detail-panel">
-					<section id="assessmentPanel" class="assessment-panel" aria-live="polite"></section>
+				<div class="detail-panel" aria-label="Assessment detail">
+					<h2 class="visually-hidden" id="assessmentHeading">Assessment detail</h2>
+					<section id="assessmentPanel" class="assessment-panel" aria-labelledby="assessmentHeading" aria-live="polite"></section>
 				</div>
 			</div>`;
 	}
@@ -1118,6 +1154,10 @@ class IssueTriagePanel {
 				if (!repository) {
 					break;
 				}
+				this.services.telemetry.trackEvent('dashboard.issueSelected', {
+					repository,
+					issue: String(issueNumber)
+				});
 				await this.sendLatestAssessment(repository, issueNumber);
 				break;
 			}
@@ -1149,9 +1189,25 @@ class IssueTriagePanel {
 				await this.exportAssessment(repository, issueNumber, format);
 				break;
 			}
-			case 'webview.filtersChanged':
-				await this.services.issueManager.updateFilters(this.ensureFilterPayload(message.filters));
+			case 'webview.filtersChanged': {
+				const filters = this.ensureFilterPayload(message.filters);
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName ?? 'unselected';
+				this.services.telemetry.trackEvent('dashboard.filtersChanged', {
+					repository,
+					state: filters.state ?? 'open',
+					readiness: filters.readiness ?? 'all',
+					label: filters.label ?? 'none',
+					assignee: filters.assignee ?? 'none',
+					milestone: filters.milestone ?? 'none',
+					search: filters.search ? 'entered' : 'empty'
+				}, {
+					searchLength: filters.search ? filters.search.length : 0,
+					visibleIssues: snapshot.issues.length
+				});
+				await this.services.issueManager.updateFilters(filters);
 				break;
+			}
 			case 'webview.signOut':
 				await this.services.issueManager.signOut();
 				break;
@@ -1572,12 +1628,21 @@ class IssueTriagePanel {
 		const payload = value as Record<string, unknown>;
 		const stateValue = this.normalizeString(payload.state);
 		const normalizedState = stateValue === 'open' || stateValue === 'closed' ? stateValue : undefined;
+		const readinessValue = this.normalizeString(payload.readiness);
+		const normalizedReadiness = readinessValue === 'all'
+			|| readinessValue === 'ready'
+			|| readinessValue === 'prepare'
+			|| readinessValue === 'review'
+			|| readinessValue === 'manual'
+			? readinessValue
+			: undefined;
 		return {
 			search: this.normalizeString(payload.search),
 			label: this.normalizeString(payload.label),
 			assignee: this.normalizeString(payload.assignee),
 			milestone: this.normalizeString(payload.milestone),
-			state: normalizedState
+			state: normalizedState,
+			readiness: normalizedReadiness
 		};
 	}
 }
