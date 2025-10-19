@@ -122,14 +122,22 @@ export class RiskStorage implements RiskProfileStore {
 			issueNumber: Number(row.issue_number ?? 0),
 			riskLevel: String(row.risk_level ?? 'low') as RiskProfile['riskLevel'],
 			riskScore: Number(row.risk_score ?? 0),
-			metrics: this.parseJson(row.metrics, {
-				prCount: 0,
-				filesTouched: 0,
-				totalAdditions: 0,
-				totalDeletions: 0,
-				changeVolume: 0,
-				reviewCommentCount: 0
-			}),
+			metrics: (() => {
+				const fallback: RiskProfile['metrics'] = {
+					prCount: 0,
+					filesTouched: 0,
+					totalAdditions: 0,
+					totalDeletions: 0,
+					changeVolume: 0,
+					reviewCommentCount: 0,
+					directCommitCount: 0,
+					directCommitAdditions: 0,
+					directCommitDeletions: 0,
+					directCommitChangeVolume: 0
+				};
+				const parsed = this.parseJson(row.metrics, fallback);
+				return { ...fallback, ...parsed };
+			})(),
 			evidence: this.parseJson(row.evidence, []),
 			drivers: this.parseJson(row.drivers, []),
 			lookbackDays: Number(row.lookback_days ?? 0),

@@ -263,7 +263,7 @@ export class AssessmentService {
 					messages: [
 						{
 							role: 'system',
-							content: 'You are IssueTriage, an assistant that evaluates GitHub issues for project readiness, risk, and impact. Always respond with JSON matching the requested schema.'
+							content: 'You are IssueTriage, an assistant that evaluates GitHub issues for automation readiness, risk, and impact. Focus on enabling an autonomous AI coding agent to implement or complete the work. Diagnose missing context, requirements, validation, or safeguards that block automation and prescribe actions that increase automation success. Always respond with JSON matching the requested schema.'
 						},
 						{
 							role: 'user',
@@ -326,7 +326,9 @@ export class AssessmentService {
   },
   "recommendations": string[]
 }
-- Scores must be 0-100 numbers with one decimal precision. Base composite on the other four dimensions. Provide concise summary (max 4 sentences). Include up to five actionable recommendations.
+ Scores must be 0-100 numbers with one decimal precision. Base composite on the other four dimensions. Provide concise summary (max 4 sentences).
+ Recommendations must focus on actions that increase the issue's readiness for completion by an autonomous AI coding agent (e.g. clarify requirements, surface acceptance tests, provide environment details, add safety guardrails, enumerate validation/rollback steps).
+ Include up to five actionable recommendations.
 `;
 	}
 

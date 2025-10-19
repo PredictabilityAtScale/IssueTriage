@@ -34,6 +34,10 @@
 	const overviewMetrics = /** @type {HTMLElement} */ (requireElement('overviewMetrics'));
 	const openTab = /** @type {HTMLButtonElement} */ (requireElement('openTab'));
 	const closedTab = /** @type {HTMLButtonElement} */ (requireElement('closedTab'));
+	const unlinkedTab = /** @type {HTMLButtonElement} */ (requireElement('unlinkedTab'));
+	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
+	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
+	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
 
 
 	const READINESS_OPTIONS = [
@@ -77,7 +81,8 @@
 	let latestAssessment = null;
 	/** @type {any[]} */
 	let assessmentHistory = [];
-	let currentStateFilter = 'open';
+	let currentTab = 'open';
+	let issueStateFilter = 'open';
 	/** @type {number | undefined} */
 	let searchDebounceHandle = undefined;
 
@@ -143,7 +148,7 @@
 	});
 
 	function onFilterChanged() {
-		const stateFilter = currentStateFilter || 'open';
+		const stateFilter = issueStateFilter || 'open';
 		const readinessValue = readinessFilter.value || 'all';
 		const filters = {
 			search: searchInput.value || undefined,
@@ -172,29 +177,69 @@
 	});
 
 	openTab.addEventListener('click', () => {
-		if (currentStateFilter !== 'open') {
-			console.log('[IssueTriage] Switching to open tab');
-			currentStateFilter = 'open';
-			updateStateTabs();
-			onFilterChanged();
+		if (currentTab === 'open' && issueStateFilter === 'open') {
+			return;
 		}
+		console.log('[IssueTriage] Switching to open tab');
+		currentTab = 'open';
+		issueStateFilter = 'open';
+		updateStateTabs();
+		if (latestState) {
+			latestState = {
+				...latestState,
+				filters: {
+					...(latestState.filters ?? {}),
+					state: 'open'
+				}
+			};
+			renderState(latestState);
+		}
+		onFilterChanged();
 	});
 
 	closedTab.addEventListener('click', () => {
-		if (currentStateFilter !== 'closed') {
-			console.log('[IssueTriage] Switching to closed tab');
-			currentStateFilter = 'closed';
-			updateStateTabs();
-			onFilterChanged();
+		if (currentTab === 'closed' && issueStateFilter === 'closed') {
+			return;
+		}
+		console.log('[IssueTriage] Switching to closed tab');
+		currentTab = 'closed';
+		issueStateFilter = 'closed';
+		updateStateTabs();
+		if (latestState) {
+			latestState = {
+				...latestState,
+				filters: {
+					...(latestState.filters ?? {}),
+					state: 'closed'
+				}
+			};
+			renderState(latestState);
+		}
+		onFilterChanged();
+	});
+
+	unlinkedTab.addEventListener('click', () => {
+		if (currentTab === 'unlinked') {
+			return;
+		}
+		console.log('[IssueTriage] Switching to unlinked tab');
+		currentTab = 'unlinked';
+		updateStateTabs();
+		if (latestState) {
+			renderState(latestState);
 		}
 	});
 
 	function updateStateTabs() {
-		const openSelected = currentStateFilter === 'open';
+		const openSelected = currentTab === 'open';
+		const closedSelected = currentTab === 'closed';
+		const unlinkedSelected = currentTab === 'unlinked';
 		openTab.classList.toggle('active', openSelected);
 		openTab.setAttribute('aria-pressed', openSelected ? 'true' : 'false');
-		closedTab.classList.toggle('active', !openSelected);
-		closedTab.setAttribute('aria-pressed', openSelected ? 'false' : 'true');
+		closedTab.classList.toggle('active', closedSelected);
+		closedTab.setAttribute('aria-pressed', closedSelected ? 'true' : 'false');
+		unlinkedTab.classList.toggle('active', unlinkedSelected);
+		unlinkedTab.setAttribute('aria-pressed', unlinkedSelected ? 'true' : 'false');
 	}
 
 	issueList.addEventListener('click', event => {
@@ -357,6 +402,55 @@
 		}
 	});
 
+	refreshBackfillButton.addEventListener('click', () => {
+		vscodeApi.postMessage({ type: 'webview.refreshUnlinked' });
+	});
+
+	backfillPanel.addEventListener('click', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const button = event.target.closest('button[data-backfill-action]');
+		if (!button || !backfillPanel.contains(button)) {
+			return;
+		}
+		event.preventDefault();
+		const action = button.getAttribute('data-backfill-action');
+		const type = button.getAttribute('data-backfill-type');
+		const id = button.getAttribute('data-backfill-id');
+		if (!action || !type || !id) {
+			return;
+		}
+		if (action === 'open') {
+			const url = button.getAttribute('data-backfill-url');
+			if (url) {
+				vscodeApi.postMessage({ type: 'webview.openUrl', url });
+			}
+			return;
+		}
+		if (type === 'pull') {
+			const pullNumber = Number(id);
+			if (!Number.isFinite(pullNumber)) {
+				return;
+			}
+			if (action === 'link') {
+				vscodeApi.postMessage({ type: 'webview.linkPullRequest', pullNumber });
+			} else if (action === 'create-open') {
+				vscodeApi.postMessage({ type: 'webview.createIssueFromPullRequest', pullNumber, state: 'open' });
+			} else if (action === 'create-closed') {
+				vscodeApi.postMessage({ type: 'webview.createIssueFromPullRequest', pullNumber, state: 'closed' });
+			}
+		} else if (type === 'commit') {
+			if (action === 'link') {
+				vscodeApi.postMessage({ type: 'webview.linkCommit', sha: id });
+			} else if (action === 'create-open') {
+				vscodeApi.postMessage({ type: 'webview.createIssueFromCommit', sha: id, state: 'open' });
+			} else if (action === 'create-closed') {
+				vscodeApi.postMessage({ type: 'webview.createIssueFromCommit', sha: id, state: 'closed' });
+			}
+		}
+	});
+
 	/**
 	 * @param {any} state
 	 */
@@ -371,21 +465,13 @@
 			filters,
 			lastUpdated,
 			automationLaunchEnabled,
-			dashboardMetrics
+			dashboardMetrics,
+			unlinkedWork
 		} = state;
 
 		connectButton.disabled = loading;
 		connectButton.textContent = session ? 'Sign Out' : 'Connect';
 		refreshButton.disabled = loading || !selectedRepository;
-
-		if (loadingState) {
-			loadingState.hidden = !loading;
-		}
-		if (loading) {
-			issueList.setAttribute('aria-busy', 'true');
-		} else {
-			issueList.removeAttribute('aria-busy');
-		}
 
 		if (session) {
 			accountLabel.textContent = 'Signed in as ' + session.login;
@@ -404,8 +490,9 @@
 		}
 
 		const nextStateFilter = filters.state || 'open';
-		if (currentStateFilter !== nextStateFilter) {
-			currentStateFilter = nextStateFilter;
+		issueStateFilter = nextStateFilter;
+		if (currentTab !== 'unlinked') {
+			currentTab = nextStateFilter;
 		}
 		updateStateTabs();
 
@@ -432,39 +519,82 @@
 		renderReadinessFilter(filters.readiness);
 		renderOverviewMetrics(dashboardMetrics);
 
-		if (!loading && issues.length === 0) {
-			emptyState.hidden = false;
-			issueList.innerHTML = '';
-			issueList.removeAttribute('aria-activedescendant');
+		const showIssues = currentTab !== 'unlinked';
+
+		if (loadingState) {
+			loadingState.hidden = !showIssues || !loading;
+		}
+		if (showIssues && loading) {
+			issueList.setAttribute('aria-busy', 'true');
+		} else {
+			issueList.removeAttribute('aria-busy');
+		}
+
+		overviewMetrics.hidden = !showIssues;
+		issueList.hidden = !showIssues;
+
+		if (showIssues) {
+			if (!loading && issues.length === 0) {
+				emptyState.hidden = false;
+				issueList.innerHTML = '';
+				issueList.removeAttribute('aria-activedescendant');
+			} else {
+				emptyState.hidden = true;
+				issueList.innerHTML = issues.map(/** @param {any} issue */ issue => renderIssue(issue)).join('');
+			}
 		} else {
 			emptyState.hidden = true;
-			issueList.innerHTML = issues.map(/** @param {any} issue */ issue => renderIssue(issue)).join('');
+			issueList.innerHTML = '';
+			issueList.removeAttribute('aria-activedescendant');
 		}
 
-		if (loading) {
-			issueSummary.textContent = 'Loading issues...';
-		} else if (selectedRepository) {
-			const issueStateLabel = nextStateFilter === 'closed' ? 'closed issues' : 'open issues';
-			const summaryParts = [issues.length + ' ' + issueStateLabel];
-			if (dashboardMetrics && dashboardMetrics.totalIssuesAssessed) {
-				const assessmentsText = dashboardMetrics.totalIssuesAssessed + ' assessed';
-				const averageText = typeof dashboardMetrics.averageComposite === 'number'
-					? 'avg ' + dashboardMetrics.averageComposite.toFixed(1)
-					: undefined;
-				summaryParts.push(averageText ? assessmentsText + ' (' + averageText + ')' : assessmentsText);
+		if (showIssues) {
+			if (loading) {
+				issueSummary.textContent = 'Loading issues...';
+			} else if (selectedRepository) {
+				const issueStateLabel = nextStateFilter === 'closed' ? 'closed issues' : 'open issues';
+				const summaryParts = [issues.length + ' ' + issueStateLabel];
+				if (dashboardMetrics && dashboardMetrics.totalIssuesAssessed) {
+					const assessmentsText = dashboardMetrics.totalIssuesAssessed + ' assessed';
+					const averageText = typeof dashboardMetrics.averageComposite === 'number'
+						? 'avg ' + dashboardMetrics.averageComposite.toFixed(1)
+						: undefined;
+					summaryParts.push(averageText ? assessmentsText + ' (' + averageText + ')' : assessmentsText);
+				}
+				const readinessMeta = getReadinessByKey(filters.readiness);
+				if (readinessMeta && readinessMeta.key !== 'all') {
+					summaryParts.push(readinessMeta.label);
+				}
+				if (lastUpdated) {
+					summaryParts.push('Updated ' + new Date(lastUpdated).toLocaleString());
+				}
+				issueSummary.textContent = summaryParts.join(' · ');
+			} else {
+				issueSummary.textContent = '';
 			}
-			const readinessMeta = getReadinessByKey(filters.readiness);
-			if (readinessMeta && readinessMeta.key !== 'all') {
-				summaryParts.push(readinessMeta.label);
-			}
-			if (lastUpdated) {
-				summaryParts.push('Updated ' + new Date(lastUpdated).toLocaleString());
-			}
-			issueSummary.textContent = summaryParts.join(' · ');
 		} else {
-			issueSummary.textContent = '';
+			const work = unlinkedWork ?? { loading: false, pullRequests: [], commits: [] };
+			if (!selectedRepository) {
+				issueSummary.textContent = 'Connect to a repository to review unlinked work.';
+			} else if (work.loading) {
+				issueSummary.textContent = 'Scanning unlinked work…';
+			} else if (work.error) {
+				issueSummary.textContent = 'Unable to load unlinked work.';
+			} else {
+				const prCount = Array.isArray(work.pullRequests) ? work.pullRequests.length : 0;
+				const commitCount = Array.isArray(work.commits) ? work.commits.length : 0;
+				const summaryParts = [
+					prCount + (prCount === 1 ? ' unlinked pull request' : ' unlinked pull requests'),
+					commitCount + (commitCount === 1 ? ' unlinked commit' : ' unlinked commits')
+				];
+				if (work.lastUpdated) {
+					summaryParts.push('Updated ' + new Date(work.lastUpdated).toLocaleString());
+				}
+				issueSummary.textContent = summaryParts.join(' · ');
+			}
 		}
 
+		renderBackfillPanel(state);
 		enforceSelection();
 		renderRiskDisplay(selectedIssueNumber);
 	}
@@ -632,10 +762,17 @@
 		const scoreText = typeof summary.riskScore === 'number' ? summary.riskScore.toFixed(0) : 'n/a';
 		const metricsItems = [];
 		if (summary.metrics) {
-			metricsItems.push(String(summary.metrics.prCount) + ' linked pull requests');
-			metricsItems.push(String(summary.metrics.filesTouched) + ' files touched');
-			metricsItems.push(String(summary.metrics.changeVolume) + ' lines changed');
-			metricsItems.push(String(summary.metrics.reviewCommentCount) + ' review friction signals');
+			const prCount = typeof summary.metrics.prCount === 'number' ? summary.metrics.prCount : 0;
+			const commitCount = typeof summary.metrics.directCommitCount === 'number' ? summary.metrics.directCommitCount : 0;
+			if (prCount > 0) {
+				metricsItems.push(prCount + ' linked pull requests');
+			}
+			if (commitCount > 0) {
+				metricsItems.push(commitCount + ' linked commits');
+			}
+			metricsItems.push(String(summary.metrics.filesTouched ?? 0) + ' files touched');
+			metricsItems.push(String(summary.metrics.changeVolume ?? 0) + ' lines changed');
+			metricsItems.push(String(summary.metrics.reviewCommentCount ?? 0) + ' review friction signals');
 		}
 		const metricsHtml = metricsItems.length
 			? '<ul class="risk-metrics">' + metricsItems.map(/** @param {any} item */ item => '<li>' + escapeHtml(item) + '</li>').join('') + '</ul>'
@@ -666,6 +803,160 @@
 		}
 		const summary = typeof issueNumber === 'number' ? getRiskSummary(issueNumber) : undefined;
 		container.innerHTML = renderRiskSection(summary);
+	}
+
+	/**
+	 * @param {any} state
+	 */
+	function renderBackfillPanel(state) {
+		if (!backfillBody) {
+			return;
+		}
+		const showPanel = currentTab === 'unlinked';
+		backfillPanel.hidden = !showPanel;
+		const repository = state?.selectedRepository?.fullName;
+		const work = state?.unlinkedWork ?? { loading: false, pullRequests: [], commits: [] };
+		if (!repository) {
+			backfillBody.innerHTML = '<div class="backfill-empty">Connect to a repository to review unlinked pull requests and commits.</div>';
+			refreshBackfillButton.disabled = true;
+			backfillPanel.setAttribute('aria-busy', 'false');
+			return;
+		}
+		refreshBackfillButton.disabled = Boolean(work.loading);
+		if (work.loading) {
+			backfillPanel.setAttribute('aria-busy', 'true');
+			backfillBody.innerHTML = '<div class="backfill-loading">Scanning pull requests and commits…</div>';
+			return;
+		}
+		backfillPanel.setAttribute('aria-busy', 'false');
+		if (work.error) {
+			backfillBody.innerHTML = '<div class="backfill-error">' + escapeHtml(work.error) + '</div>';
+			return;
+		}
+		const updatedText = work.lastUpdated
+			? '<p class="backfill-item-meta">' + escapeHtml('Updated ' + new Date(work.lastUpdated).toLocaleString()) + '</p>'
+			: '';
+		if ((!work.pullRequests || work.pullRequests.length === 0) && (!work.commits || work.commits.length === 0)) {
+			backfillBody.innerHTML = updatedText + '<div class="backfill-empty">Everything is linked. No pull requests or commits need backfill.</div>';
+			return;
+		}
+		const pullSection = renderBackfillSection('Pull requests', work.pullRequests?.length ?? 0, renderBackfillPullRequests(work.pullRequests ?? []));
+		const commitSection = renderBackfillSection('Commits', work.commits?.length ?? 0, renderBackfillCommits(work.commits ?? []));
+		backfillBody.innerHTML = updatedText + '<div class="backfill-columns">' + pullSection + commitSection + '</div>';
+	}
+
+	/**
+	 * @param {string} title
+	 * @param {number} count
+	 * @param {string} contentHtml
+	 */
+	function renderBackfillSection(title, count, contentHtml) {
+		const countLabel = count === 1 ? '1 unlinked item' : count + ' unlinked items';
+		return '<section class="backfill-section"><header><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(countLabel) + '</p></header>' + contentHtml + '</section>';
+	}
+
+	/**
+	 * @param {Array<any>} pullRequests
+	 */
+	function renderBackfillPullRequests(pullRequests) {
+		if (!pullRequests.length) {
+			return '<div class="backfill-empty">All pull requests are linked to issues.</div>';
+		}
+		const items = pullRequests.map(pr => {
+			const stateLabel = pr.state === 'merged' ? 'Merged' : (pr.state === 'closed' ? 'Closed' : 'Open');
+			const badge = '<span class="backfill-badge">' + escapeHtml(stateLabel) + '</span>';
+			const metaParts = [];
+			if (pr.updatedAt) {
+				metaParts.push('Updated ' + new Date(pr.updatedAt).toLocaleString());
+			}
+			if (pr.author) {
+				metaParts.push('@' + pr.author);
+			}
+			const meta = metaParts.length ? metaParts.map(text => escapeHtml(text)).join(' · ') : '&nbsp;';
+			const statsParts = [
+				pr.commits + ' commits',
+				pr.changedFiles + ' files',
+				'+' + pr.additions + ' / -' + pr.deletions
+			];
+			const stats = statsParts.map(part => escapeHtml(String(part))).join(' · ');
+			const branch = pr.headRefName && pr.baseRefName
+				? '<div class="backfill-stats">' + escapeHtml(pr.headRefName) + ' → ' + escapeHtml(pr.baseRefName) + '</div>'
+				: '';
+			const urlAttribute = pr.url ? escapeHtml(pr.url) : '';
+			return '<li class="backfill-item" data-backfill-type="pull" data-backfill-id="' + pr.number + '">' +
+				'<div class="backfill-item-header">' +
+					'<span class="backfill-item-title">' + badge + ' #' + pr.number + ' · ' + escapeHtml(pr.title) + '</span>' +
+					'<span class="backfill-item-meta">' + meta + '</span>' +
+				'</div>' +
+				branch +
+				'<div class="backfill-stats">' + stats + '</div>' +
+				'<div class="backfill-buttons">' +
+					'<button type="button" data-backfill-action="link" data-backfill-type="pull" data-backfill-id="' + pr.number + '">Link to issue</button>' +
+					'<button type="button" data-backfill-action="create-open" data-backfill-type="pull" data-backfill-id="' + pr.number + '">Create issue (open)</button>' +
+					'<button type="button" data-backfill-action="create-closed" data-backfill-type="pull" data-backfill-id="' + pr.number + '">Create issue (close)</button>' +
+					(pr.url ? '<button type="button" data-backfill-action="open" data-backfill-type="pull" data-backfill-id="' + pr.number + '" data-backfill-url="' + urlAttribute + '">Open PR</button>' : '') +
+				'</div>' +
+			'</li>';
+		}).join('');
+		return '<ul class="backfill-list">' + items + '</ul>';
+	}
+
+	/**
+	 * @param {Array<any>} commits
+	 */
+	function renderBackfillCommits(commits) {
+		if (!commits.length) {
+			return '<div class="backfill-empty">All commits are associated with pull requests.</div>';
+		}
+		const items = commits.map(commit => {
+			const shortSha = commit.sha ? String(commit.sha).slice(0, 7) : '';
+			const metaParts = [];
+			if (commit.committedDate) {
+				metaParts.push(new Date(commit.committedDate).toLocaleString());
+			}
+			if (commit.author) {
+				metaParts.push('@' + commit.author);
+			}
+			const meta = metaParts.length ? metaParts.map(text => escapeHtml(text)).join(' · ') : '&nbsp;';
+			const statsParts = [
+				commit.changedFiles + ' files',
+				'+' + commit.additions + ' / -' + commit.deletions
+			];
+			const stats = statsParts.map(part => escapeHtml(String(part))).join(' · ');
+			const shaAttribute = escapeHtml(String(commit.sha));
+			const urlButton = commit.url
+				? '<button type="button" data-backfill-action="open" data-backfill-type="commit" data-backfill-id="' + shaAttribute + '" data-backfill-url="' + escapeHtml(String(commit.url)) + '">Open commit</button>'
+				: '';
+			const message = commit.message ? truncateText(commit.message, 90) : shaAttribute;
+			return '<li class="backfill-item" data-backfill-type="commit" data-backfill-id="' + shaAttribute + '">' +
+				'<div class="backfill-item-header">' +
+					'<span class="backfill-item-title">' + escapeHtml(shortSha) + ' · ' + escapeHtml(message) + '</span>' +
+					'<span class="backfill-item-meta">' + meta + '</span>' +
+				'</div>' +
+				'<div class="backfill-stats">' + stats + '</div>' +
+				'<div class="backfill-buttons">' +
+					'<button type="button" data-backfill-action="link" data-backfill-type="commit" data-backfill-id="' + shaAttribute + '">Link to issue</button>' +
+					'<button type="button" data-backfill-action="create-open" data-backfill-type="commit" data-backfill-id="' + shaAttribute + '">Create issue (open)</button>' +
+					'<button type="button" data-backfill-action="create-closed" data-backfill-type="commit" data-backfill-id="' + shaAttribute + '">Create issue (close)</button>' +
+					urlButton +
+				'</div>' +
+			'</li>';
+		}).join('');
+		return '<ul class="backfill-list">' + items + '</ul>';
+	}
+
+	/**
+	 * @param {string} value
+	 * @param {number} maxLength
+	 */
+	function truncateText(value, maxLength) {
+		if (typeof value !== 'string') {
+			return '';
+		}
+		if (value.length <= maxLength) {
+			return value;
+		}
+		return value.slice(0, maxLength - 1) + '…';
 	}
 
 	/**
@@ -708,6 +999,10 @@
 		if (!latestState || !latestState.selectedRepository) {
 			selectedIssueNumber = undefined;
 			renderAssessmentEmpty('Connect to a repository to view assessments.');
+			issueList.removeAttribute('aria-activedescendant');
+			return;
+		}
+		if (currentTab === 'unlinked') {
 			issueList.removeAttribute('aria-activedescendant');
 			return;
 		}

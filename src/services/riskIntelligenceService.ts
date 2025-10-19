@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { IssueSummary, IssueRiskSnapshot, PullRequestRiskData } from './githubClient';
+import type { IssueSummary, IssueRiskSnapshot, PullRequestRiskData, CommitRiskData } from './githubClient';
 import type { RiskProfileStore } from './riskStorage';
 import type { RiskProfile, RiskSummary, RiskMetrics, RiskLevel } from '../types/risk';
 
@@ -242,16 +242,16 @@ export class RiskIntelligenceService implements vscode.Disposable {
 
 		try {
 			const snapshot = await this.github.getIssueRiskSnapshot(task.repository, task.issueNumber);
-			
-			// Skip if no pull requests are linked - no meaningful risk data
-			if (!snapshot.pullRequests || snapshot.pullRequests.length === 0) {
+			const pullRequests = snapshot.pullRequests ?? [];
+			const commits = snapshot.commits ?? [];
+			if (pullRequests.length === 0 && commits.length === 0) {
 				const skipSummary: RiskSummary = {
 					status: 'skipped',
-					message: 'No linked pull requests found. Risk analysis requires merged PR history.'
+					message: 'No linked pull requests or commits found. Risk analysis requires recent change history.'
 				};
 				this.cacheSummary(repoKey, task.issueNumber, skipSummary);
 				this.emitUpdate(task.repository, task.issueNumber, skipSummary);
-				this.telemetry.trackEvent('risk.skippedNoPRs', {
+				this.telemetry.trackEvent('risk.skippedNoHistory', {
 					repository: task.repository,
 					issue: String(task.issueNumber)
 				});
@@ -286,11 +286,13 @@ export class RiskIntelligenceService implements vscode.Disposable {
 	}
 
 	private buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot): RiskProfile {
-		const metrics = this.computeMetrics(snapshot.pullRequests);
+		const pullRequests = snapshot.pullRequests ?? [];
+		const commits = snapshot.commits ?? [];
+		const metrics = this.computeMetrics(pullRequests, commits);
 		const riskScore = this.calculateRiskScore(metrics);
 		const riskLevel = this.scoreToLevel(riskScore);
 		const drivers = this.identifyDrivers(metrics);
-		const evidence = this.buildEvidence(snapshot.pullRequests);
+		const evidence = this.buildEvidence(pullRequests, commits);
 		return {
 			repository: task.repository,
 			issueNumber: task.issueNumber,
@@ -305,28 +307,50 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		};
 	}
 
-	private computeMetrics(pullRequests: PullRequestRiskData[]): RiskMetrics {
-		return pullRequests.reduce<RiskMetrics>((acc, pr) => {
-			acc.prCount += 1;
-			acc.filesTouched += pr.changedFiles ?? 0;
-			acc.totalAdditions += pr.additions ?? 0;
-			acc.totalDeletions += pr.deletions ?? 0;
-			acc.changeVolume += (pr.additions ?? 0) + (pr.deletions ?? 0);
-			const reviewFriction = (pr.reviewComments ?? 0) + (pr.comments ?? 0) + (pr.reviewStates?.CHANGES_REQUESTED ?? 0) * 2;
-			acc.reviewCommentCount += reviewFriction;
-			return acc;
-		}, {
+	private computeMetrics(pullRequests: PullRequestRiskData[], commits: CommitRiskData[]): RiskMetrics {
+		const includeCommits = pullRequests.length === 0;
+		const metrics: RiskMetrics = {
 			prCount: 0,
 			filesTouched: 0,
 			totalAdditions: 0,
 			totalDeletions: 0,
 			changeVolume: 0,
-			reviewCommentCount: 0
-		});
+			reviewCommentCount: 0,
+			directCommitCount: 0,
+			directCommitAdditions: 0,
+			directCommitDeletions: 0,
+			directCommitChangeVolume: 0
+		};
+
+		for (const pr of pullRequests) {
+			metrics.prCount += 1;
+			metrics.filesTouched += pr.changedFiles ?? 0;
+			metrics.totalAdditions += pr.additions ?? 0;
+			metrics.totalDeletions += pr.deletions ?? 0;
+			metrics.changeVolume += (pr.additions ?? 0) + (pr.deletions ?? 0);
+			const reviewFriction = (pr.reviewComments ?? 0) + (pr.comments ?? 0) + (pr.reviewStates?.CHANGES_REQUESTED ?? 0) * 2;
+			metrics.reviewCommentCount += reviewFriction;
+		}
+
+		if (includeCommits) {
+			for (const commit of commits) {
+				metrics.directCommitCount += 1;
+				metrics.filesTouched += commit.changedFiles ?? 0;
+				metrics.directCommitAdditions += commit.additions ?? 0;
+				metrics.directCommitDeletions += commit.deletions ?? 0;
+				metrics.directCommitChangeVolume += (commit.additions ?? 0) + (commit.deletions ?? 0);
+				metrics.totalAdditions += commit.additions ?? 0;
+				metrics.totalDeletions += commit.deletions ?? 0;
+				metrics.changeVolume += (commit.additions ?? 0) + (commit.deletions ?? 0);
+			}
+		}
+
+		return metrics;
 	}
 
 	private calculateRiskScore(metrics: RiskMetrics): number {
-		const prScore = Math.min(40, metrics.prCount * 15);
+		const changeSets = metrics.prCount + metrics.directCommitCount;
+		const prScore = Math.min(40, changeSets * 15);
 		const fileScore = Math.min(20, Math.floor(metrics.filesTouched / 5) * 5);
 		const churnScore = Math.min(20, Math.floor(metrics.changeVolume / 200) * 5);
 		const reviewScore = Math.min(20, Math.floor(metrics.reviewCommentCount / 5) * 5);
@@ -349,8 +373,12 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		if (metrics.prCount > 1) {
 			drivers.push(`${metrics.prCount} pull requests were required for similar work.`);
 		}
+		if (metrics.directCommitCount > 0 && metrics.prCount === 0) {
+			drivers.push(`${metrics.directCommitCount} direct commits linked to this issue.`);
+		}
 		if (metrics.filesTouched >= 25) {
-			drivers.push(`${metrics.filesTouched} files touched across linked pull requests.`);
+			const scope = metrics.prCount > 0 ? 'pull requests' : 'direct commits';
+			drivers.push(`${metrics.filesTouched} files touched across linked ${scope}.`);
 		}
 		if (metrics.changeVolume >= 1000) {
 			drivers.push(`${metrics.changeVolume} lines changed recently.`);
@@ -358,16 +386,27 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		if (metrics.reviewCommentCount >= 15) {
 			drivers.push(`High review friction with ${metrics.reviewCommentCount} comments or change requests.`);
 		}
+		if (metrics.directCommitChangeVolume >= 600 && metrics.prCount === 0) {
+			drivers.push(`${metrics.directCommitChangeVolume} lines changed across direct commits.`);
+		}
 		return drivers.slice(0, 5);
 	}
 
-	private buildEvidence(pullRequests: PullRequestRiskData[]): RiskProfile['evidence'] {
-		return pullRequests.slice(0, 5).map(pr => ({
-			label: `PR #${pr.number}`,
-			detail: `${pr.changedFiles ?? 0} files · +${pr.additions ?? 0}/-${pr.deletions ?? 0} · ${pr.reviewComments ?? 0} review comments`,
-			url: pr.url,
-			prSummary: pr.title,
-			prNumber: pr.number
+	private buildEvidence(pullRequests: PullRequestRiskData[], commits: CommitRiskData[]): RiskProfile['evidence'] {
+		if (pullRequests.length > 0) {
+			return pullRequests.slice(0, 5).map(pr => ({
+				label: `PR #${pr.number}`,
+				detail: `${pr.changedFiles ?? 0} files · +${pr.additions ?? 0}/-${pr.deletions ?? 0} · ${pr.reviewComments ?? 0} review comments`,
+				url: pr.url,
+				prSummary: pr.title,
+				prNumber: pr.number
+			}));
+		}
+		return commits.slice(0, 5).map(commit => ({
+			label: `Commit ${commit.sha.slice(0, 7)}`,
+			detail: `${commit.changedFiles ?? 0} files · +${commit.additions ?? 0}/-${commit.deletions ?? 0}`,
+			url: commit.url,
+			prSummary: commit.message
 		}));
 	}
 
@@ -382,7 +421,8 @@ export class RiskIntelligenceService implements vscode.Disposable {
 				prCount: profile.metrics.prCount,
 				filesTouched: profile.metrics.filesTouched,
 				changeVolume: profile.metrics.changeVolume,
-				reviewCommentCount: profile.metrics.reviewCommentCount
+				reviewCommentCount: profile.metrics.reviewCommentCount,
+				directCommitCount: profile.metrics.directCommitCount
 			},
 			stale
 		};

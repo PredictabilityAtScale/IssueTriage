@@ -7,6 +7,10 @@ export interface RiskMetrics {
 	totalDeletions: number;
 	changeVolume: number;
 	reviewCommentCount: number;
+	directCommitCount: number;
+	directCommitAdditions: number;
+	directCommitDeletions: number;
+	directCommitChangeVolume: number;
 }
 
 export interface RiskEvidence {
@@ -36,7 +40,7 @@ export interface RiskSummary {
 	riskScore?: number;
 	calculatedAt?: string;
 	topDrivers?: string[];
-	metrics?: Pick<RiskMetrics, 'prCount' | 'filesTouched' | 'changeVolume' | 'reviewCommentCount'>;
+	metrics?: Pick<RiskMetrics, 'prCount' | 'filesTouched' | 'changeVolume' | 'reviewCommentCount' | 'directCommitCount'>;
 	message?: string;
 	stale?: boolean;
 }

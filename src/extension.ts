@@ -604,6 +604,155 @@ class IssueTriagePanel {
 				overflow-y: auto;
 			}
 
+				.backfill-panel {
+					margin-top: 24px;
+					padding: 16px;
+					border-radius: 6px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-button-background) 4%);
+					display: flex;
+					flex-direction: column;
+					gap: 12px;
+				}
+
+				.backfill-header {
+					display: flex;
+					align-items: center;
+					justify-content: space-between;
+					gap: 12px;
+				}
+
+				.backfill-header h2 {
+					margin: 0;
+					font-size: 16px;
+				}
+
+				.backfill-body {
+					display: flex;
+					flex-direction: column;
+					gap: 16px;
+				}
+
+				.backfill-columns {
+					display: grid;
+					gap: 16px;
+					grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+				}
+
+				.backfill-section {
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+					padding: 12px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-button-background) 6%);
+					display: flex;
+					flex-direction: column;
+					gap: 12px;
+				}
+
+				.backfill-section header {
+					display: flex;
+					flex-direction: column;
+					gap: 2px;
+				}
+
+				.backfill-section h3 {
+					margin: 0;
+					font-size: 14px;
+				}
+
+				.backfill-section p {
+					margin: 0;
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.backfill-list {
+					margin: 0;
+					padding: 0;
+					list-style: none;
+					display: flex;
+					flex-direction: column;
+					gap: 10px;
+				}
+
+				.backfill-item {
+					border-radius: 6px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.3));
+					padding: 10px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-button-background) 8%);
+					display: flex;
+					flex-direction: column;
+					gap: 8px;
+				}
+
+				.backfill-item-header {
+					display: flex;
+					align-items: flex-start;
+					justify-content: space-between;
+					gap: 8px;
+				}
+
+				.backfill-item-title {
+					font-weight: 600;
+					font-size: 13px;
+				}
+
+				.backfill-item-meta {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.backfill-stats {
+					display: flex;
+					flex-wrap: wrap;
+					gap: 8px;
+					font-size: 12px;
+				}
+
+				.backfill-buttons {
+					display: flex;
+					gap: 8px;
+					flex-wrap: wrap;
+				}
+
+				.backfill-buttons button {
+					padding: 4px 10px;
+					font-size: 12px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-button-background) 10%);
+					cursor: pointer;
+				}
+
+				.backfill-buttons button:hover {
+					border-color: var(--vscode-button-background);
+				}
+
+				.backfill-empty,
+				.backfill-error,
+				.backfill-loading {
+					padding: 12px;
+					border-radius: 6px;
+					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					text-align: center;
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.backfill-error {
+					border-color: rgba(229, 83, 75, 0.55);
+					color: rgba(229, 83, 75, 0.95);
+				}
+
+				.backfill-badge {
+					display: inline-block;
+					padding: 2px 6px;
+					border-radius: 999px;
+					font-size: 11px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-button-background) 15%);
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				}
+
 			.issue-list {
 				display: grid;
 				gap: 8px;
@@ -1068,7 +1217,7 @@ class IssueTriagePanel {
 					<button id="refresh">Refresh</button>
 				</div>
 			</div>
-			<div class="filters-bar" aria-live="polite">
+			<div id="filtersBar" class="filters-bar" aria-live="polite">
 				<div class="filter-group repo-group">
 					<label class="filter-label" id="repositoryLabel" for="repositorySelect">Repository</label>
 					<div class="repo-controls" role="group" aria-labelledby="repositoryLabel">
@@ -1098,9 +1247,10 @@ class IssueTriagePanel {
 					<select id="readinessFilter"></select>
 				</div>
 			</div>
-			<div class="state-tabs" role="group" aria-label="Issue state filter">
+			<div class="state-tabs" role="group" aria-label="Issue view selection">
 				<button class="state-tab active" id="openTab" aria-pressed="true">Open</button>
 				<button class="state-tab" id="closedTab" aria-pressed="false">Closed</button>
+				<button class="state-tab" id="unlinkedTab" aria-pressed="false">Unlinked</button>
 			</div>
 			<div class="container">
 				<div class="issue-list-panel" aria-label="Issue list and overview">
@@ -1116,6 +1266,15 @@ class IssueTriagePanel {
 					<div id="emptyState" class="empty-state" hidden role="status" aria-live="polite">
 						<p>No issues match your filters.</p>
 					</div>
+					<section id="backfillPanel" class="backfill-panel" aria-labelledby="backfillHeading" aria-live="polite" hidden>
+						<div class="backfill-header">
+							<h2 id="backfillHeading">Unlinked work</h2>
+							<div class="backfill-actions">
+								<button id="refreshBackfill" class="compact-button" type="button">Refresh</button>
+							</div>
+						</div>
+						<div id="backfillBody" class="backfill-body"></div>
+					</section>
 				</div>
 				<div class="detail-panel" aria-label="Assessment detail">
 					<h2 class="visually-hidden" id="assessmentHeading">Assessment detail</h2>
@@ -1189,6 +1348,43 @@ class IssueTriagePanel {
 				await this.exportAssessment(repository, issueNumber, format);
 				break;
 			}
+			case 'webview.linkPullRequest': {
+				const pullNumber = this.parseIssueNumber(message.pullNumber);
+				if (pullNumber === undefined) {
+					break;
+				}
+				await this.services.issueManager.linkPullRequestToIssue(pullNumber);
+				break;
+			}
+			case 'webview.createIssueFromPullRequest': {
+				const pullNumber = this.parseIssueNumber(message.pullNumber);
+				if (pullNumber === undefined) {
+					break;
+				}
+					const state = typeof message.state === 'string' ? message.state : 'open';
+					await this.services.issueManager.createIssueFromPullRequest(pullNumber, { close: state === 'closed' });
+				break;
+			}
+			case 'webview.linkCommit': {
+				const sha = typeof message.sha === 'string' ? message.sha : undefined;
+				if (!sha) {
+					break;
+				}
+				await this.services.issueManager.linkCommitToIssue(sha);
+				break;
+			}
+			case 'webview.createIssueFromCommit': {
+				const sha = typeof message.sha === 'string' ? message.sha : undefined;
+				if (!sha) {
+					break;
+				}
+					const state = typeof message.state === 'string' ? message.state : 'open';
+					await this.services.issueManager.createIssueFromCommit(sha, { close: state === 'closed' });
+				break;
+			}
+			case 'webview.refreshUnlinked':
+				await this.services.issueManager.refreshUnlinkedData(true);
+				break;
 			case 'webview.filtersChanged': {
 				const filters = this.ensureFilterPayload(message.filters);
 				const snapshot = this.services.issueManager.getSnapshot();

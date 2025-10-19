@@ -44,6 +44,9 @@ type CommentResponse = {
 type IssueEventResponse = {
 	event?: string;
 	created_at?: string;
+	actor?: { login?: string | null } | null;
+	commit_id?: string | null;
+	commit_url?: string | null;
 	source?: {
 		type?: string;
 		issue?: {
@@ -52,6 +55,10 @@ type IssueEventResponse = {
 				html_url?: string;
 				url?: string;
 			};
+		};
+		commit?: {
+			sha?: string;
+			url?: string;
 		};
 	};
 };
@@ -125,9 +132,70 @@ export interface PullRequestRiskData {
 	updatedAt?: string;
 }
 
+export interface CommitRiskData {
+	sha: string;
+	message: string;
+	url: string;
+	additions: number;
+	deletions: number;
+	changedFiles: number;
+	author?: string;
+	authoredDate?: string;
+	committedDate?: string;
+}
+
 export interface IssueRiskSnapshot {
 	issueNumber: number;
 	pullRequests: PullRequestRiskData[];
+	commits: CommitRiskData[];
+}
+
+export interface UnlinkedPullRequest {
+	number: number;
+	title: string;
+	url: string;
+	state: 'open' | 'closed' | 'merged';
+	author?: string;
+	createdAt?: string;
+	updatedAt?: string;
+	mergedAt?: string;
+	additions: number;
+	deletions: number;
+	changedFiles: number;
+	commits: number;
+	headRefName?: string;
+	baseRefName?: string;
+}
+
+export interface UnlinkedCommit {
+	sha: string;
+	message: string;
+	url: string;
+	author?: string;
+	authoredDate?: string;
+	committedDate?: string;
+	additions: number;
+	deletions: number;
+	changedFiles: number;
+}
+
+export interface PullRequestBackfillDetail extends UnlinkedPullRequest {
+	body?: string;
+	bodyText?: string;
+	files: Array<{
+		path: string;
+		additions: number;
+		deletions: number;
+	}>;
+}
+
+export interface CommitBackfillDetail extends UnlinkedCommit {
+	messageBody?: string;
+	files: Array<{
+		path: string;
+		additions: number;
+		deletions: number;
+	}>;
 }
 
 export interface IssueFilters {
@@ -147,7 +215,10 @@ export class GitHubClient {
 	private readonly repoCache = new Map<string, CacheEntry<RepositorySummary[]>>();
 	private readonly issueCache = new Map<string, CacheEntry<IssueSummary[]>>();
 	private readonly pullRequestRiskCache = new Map<string, CacheEntry<PullRequestRiskData>>();
+	private readonly commitRiskCache = new Map<string, CacheEntry<CommitRiskData>>();
 	private readonly issueRiskCache = new Map<string, CacheEntry<IssueRiskSnapshot>>();
+	private readonly unlinkedPullRequestCache = new Map<string, CacheEntry<UnlinkedPullRequest[]>>();
+	private readonly unlinkedCommitCache = new Map<string, CacheEntry<UnlinkedCommit[]>>();
 
 	constructor(
 		private readonly auth: GitHubAuthService,
@@ -314,7 +385,10 @@ export class GitHubClient {
 		this.repoCache.clear();
 		this.issueCache.clear();
 		this.pullRequestRiskCache.clear();
+		this.commitRiskCache.clear();
 		this.issueRiskCache.clear();
+		this.unlinkedPullRequestCache.clear();
+		this.unlinkedCommitCache.clear();
 	}
 
 	public async getIssueRiskSnapshot(fullName: string, issueNumber: number): Promise<IssueRiskSnapshot> {
@@ -336,10 +410,15 @@ export class GitHubClient {
 		}) as IssueEventResponse[];
 
 		const pullNumbers = new Set<number>();
+		const commitShas = new Set<string>();
 		for (const event of events) {
 			const prNumber = this.extractPullRequestNumber(event);
 			if (prNumber) {
 				pullNumbers.add(prNumber);
+			}
+			const commitSha = this.extractCommitSha(event);
+			if (commitSha) {
+				commitShas.add(commitSha);
 			}
 		}
 
@@ -355,12 +434,551 @@ export class GitHubClient {
 			}
 		}
 
+		const commits: CommitRiskData[] = [];
+		if (pullNumbers.size === 0) {
+			const comments = await client.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+				owner,
+				repo,
+				issue_number: issueNumber,
+				per_page: 100
+			}) as CommentResponse[];
+			for (const comment of comments) {
+				const commentShas = this.extractCommitShasFromBody(comment?.body, owner, repo);
+				for (const sha of commentShas) {
+					commitShas.add(sha);
+				}
+			}
+			const commitLimit = 30;
+			let processedCommits = 0;
+			for (const sha of commitShas) {
+				if (processedCommits >= commitLimit) {
+					break;
+				}
+				const commit = await this.fetchCommitRiskData(client, owner, repo, sha);
+				if (commit) {
+					commits.push(commit);
+				}
+				processedCommits += 1;
+			}
+		}
+
 		const snapshot: IssueRiskSnapshot = {
 			issueNumber,
-			pullRequests
+			pullRequests,
+			commits
 		};
 		this.storeInCache(this.issueRiskCache, cacheKey, snapshot);
 		return snapshot;
+	}
+
+	public async listUnlinkedPullRequests(
+		fullName: string,
+		options: { state?: 'open' | 'closed' | 'all'; limit?: number } = {},
+		forceRefresh = false
+	): Promise<UnlinkedPullRequest[]> {
+		const normalizedLimit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+		const cacheKey = `${fullName}:${options.state ?? 'open'}:${normalizedLimit}`;
+		if (!forceRefresh) {
+			const cached = this.getFromCache(this.unlinkedPullRequestCache, cacheKey);
+			if (cached) {
+				return cached;
+			}
+		}
+
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		const states = this.toGraphqlPullRequestStates(options.state);
+		const candidates: any[] = [];
+		let cursor: string | undefined;
+		let hasNextPage = true;
+		let safetyCounter = 0;
+
+		while (hasNextPage && candidates.length < normalizedLimit * 3 && safetyCounter < 6) {
+			safetyCounter += 1;
+			const pageSize = Math.min(50, Math.max(10, normalizedLimit * 2));
+			try {
+				const response = await client.graphql(
+					`query($owner: String!, $repo: String!, $first: Int!, $after: String, $states: [PullRequestState!]) {
+						repository(owner: $owner, name: $repo) {
+							pullRequests(first: $first, after: $after, states: $states, orderBy: { field: UPDATED_AT, direction: DESC }) {
+								pageInfo {
+									hasNextPage
+									endCursor
+								}
+								nodes {
+									number
+									title
+									url
+									state
+									headRefName
+									baseRefName
+									bodyText
+									body
+									author { login }
+									createdAt
+									updatedAt
+									mergedAt
+									additions
+									deletions
+									changedFiles
+									commits {
+										totalCount
+									}
+									closingIssuesReferences(first: 1) {
+										totalCount
+									}
+								}
+							}
+						}
+					}
+				`,
+					{ owner, repo, first: pageSize, after: cursor, states }
+				);
+				const connection = response?.repository?.pullRequests;
+				const nodes: any[] = connection?.nodes ?? [];
+				nodes.forEach(node => {
+					if (!node) {
+						return;
+					}
+					const hasClosingReferences = (node.closingIssuesReferences?.totalCount ?? 0) > 0;
+					if (hasClosingReferences) {
+						return;
+					}
+					if (this.pullRequestBodyHasIssueReference(fullName, node.bodyText ?? node.body ?? '')) {
+						return;
+					}
+					candidates.push(node);
+				});
+				hasNextPage = Boolean(connection?.pageInfo?.hasNextPage);
+				cursor = connection?.pageInfo?.endCursor ?? undefined;
+			} catch (error) {
+				this.handleError('github.pull.unlinkedListFailed', error);
+				throw error;
+			}
+		}
+
+		const results: UnlinkedPullRequest[] = [];
+		for (const node of candidates) {
+			if (!node) {
+				continue;
+			}
+			const linked = await this.pullRequestHasLinkedIssues(client, owner, repo, node.number).catch(() => false);
+			if (linked) {
+				continue;
+			}
+			results.push(this.normalizeUnlinkedPullRequestNode(node));
+			if (results.length >= normalizedLimit) {
+				break;
+			}
+		}
+
+		this.storeInCache(this.unlinkedPullRequestCache, cacheKey, results);
+		return results;
+	}
+
+	public async listCommitsWithoutPullRequests(
+		fullName: string,
+		options: { limit?: number; since?: string } = {},
+		forceRefresh = false
+	): Promise<UnlinkedCommit[]> {
+		const normalizedLimit = Math.min(Math.max(options.limit ?? 20, 1), 200);
+		const cacheKey = `${fullName}:${options.since ?? 'none'}:${normalizedLimit}`;
+		if (!forceRefresh) {
+			const cached = this.getFromCache(this.unlinkedCommitCache, cacheKey);
+			if (cached) {
+				return cached;
+			}
+		}
+
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		const historySize = Math.min(normalizedLimit * 3, 200);
+
+		let historyNodes: any[] = [];
+		try {
+			const response = await client.graphql(
+				`query($owner: String!, $repo: String!, $first: Int!, $since: GitTimestamp) {
+					repository(owner: $owner, name: $repo) {
+						defaultBranchRef {
+							target {
+								... on Commit {
+									history(first: $first, since: $since) {
+										nodes {
+											oid
+											messageHeadline
+											messageBody
+											authoredDate
+											committedDate
+											url
+											additions
+											deletions
+											changedFiles
+											author { user { login } name }
+											associatedPullRequests(first: 1) {
+												totalCount
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			`,
+				{ owner, repo, first: historySize, since: options.since ?? null }
+			);
+			historyNodes = response?.repository?.defaultBranchRef?.target?.history?.nodes ?? [];
+		} catch (error) {
+			this.handleError('github.commit.unlinkedListFailed', error);
+			throw error;
+		}
+
+		const commits: UnlinkedCommit[] = [];
+		for (const node of historyNodes) {
+			if (!node) {
+				continue;
+			}
+			const associatedCount = node.associatedPullRequests?.totalCount ?? 0;
+			if (associatedCount > 0) {
+				continue;
+			}
+			commits.push(this.normalizeUnlinkedCommitNode(node, fullName));
+			if (commits.length >= normalizedLimit) {
+				break;
+			}
+		}
+
+		this.storeInCache(this.unlinkedCommitCache, cacheKey, commits);
+		return commits;
+	}
+
+	public async getPullRequestBackfillDetail(fullName: string, pullNumber: number): Promise<PullRequestBackfillDetail> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			const response = await client.graphql(
+				`query($owner: String!, $repo: String!, $number: Int!) {
+					repository(owner: $owner, name: $repo) {
+						pullRequest(number: $number) {
+							number
+							title
+							url
+							state
+							body
+							bodyText
+							headRefName
+							baseRefName
+							author { login }
+							createdAt
+							updatedAt
+							mergedAt
+							additions
+							deletions
+							changedFiles
+							commits { totalCount }
+							files(first: 100) {
+								nodes {
+									path
+									additions
+									deletions
+								}
+							}
+						}
+					}
+				}
+			`,
+				{ owner, repo, number: pullNumber }
+			);
+			const node = response?.repository?.pullRequest;
+			if (!node) {
+				throw new Error(`Pull request #${pullNumber} not found in ${fullName}.`);
+			}
+			return {
+				...this.normalizeUnlinkedPullRequestNode(node),
+				body: node.body ?? undefined,
+				bodyText: node.bodyText ?? undefined,
+				files: (node.files?.nodes ?? []).map((file: any) => ({
+					path: file?.path ?? 'unknown',
+					additions: file?.additions ?? 0,
+					deletions: file?.deletions ?? 0
+				}))
+			};
+		} catch (error) {
+			this.handleError('github.pull.backfillDetailFailed', error);
+			throw error;
+		}
+	}
+
+	public async getCommitBackfillDetail(fullName: string, sha: string): Promise<CommitBackfillDetail> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			const response = await client.request('GET /repos/{owner}/{repo}/commits/{ref}', {
+				owner,
+				repo,
+				ref: sha
+			});
+			const data = response.data as any;
+			const summary: CommitBackfillDetail = {
+				sha: data.sha,
+				message: data.commit?.message?.split('\n')[0] ?? data.commit?.message ?? sha,
+				url: data.html_url,
+				author: data.author?.login ?? data.commit?.author?.name ?? undefined,
+				authoredDate: data.commit?.author?.date,
+				committedDate: data.commit?.committer?.date,
+				additions: data.stats?.additions ?? 0,
+				deletions: data.stats?.deletions ?? 0,
+				changedFiles: data.files ? data.files.length : 0,
+				messageBody: data.commit?.message ?? undefined,
+				files: (data.files ?? []).map((file: any) => ({
+					path: file?.filename ?? 'unknown',
+					additions: file?.additions ?? 0,
+					deletions: file?.deletions ?? 0
+				}))
+			};
+			return summary;
+		} catch (error) {
+			this.handleError('github.commit.backfillDetailFailed', error);
+			throw error;
+		}
+	}
+
+	public async linkPullRequestToIssue(fullName: string, pullNumber: number, issueNumber: number): Promise<void> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			const response = await client.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+				owner,
+				repo,
+				pull_number: pullNumber
+			});
+			const data = response.data as { body?: string };
+			const reference = `#${issueNumber}`;
+			const existingBody = (data.body ?? '').trimEnd();
+			if (existingBody.includes(reference)) {
+				return;
+			}
+			const separator = existingBody.length ? '\n\n' : '';
+			const updatedBody = `${existingBody}${separator}Linked to ${reference}`;
+			await client.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
+				owner,
+				repo,
+				issue_number: pullNumber,
+				body: updatedBody
+			});
+		} catch (error) {
+			this.handleError('github.pull.linkFailed', error);
+			throw error;
+		}
+	}
+
+	public async linkCommitToIssue(fullName: string, sha: string, issueNumber: number): Promise<void> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		const commitUrl = `https://github.com/${owner}/${repo}/commit/${sha}`;
+		const body = `Linking commit ${sha.slice(0, 7)} to this issue for backfill context.\n\n${commitUrl}`;
+		try {
+			await client.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+				owner,
+				repo,
+				issue_number: issueNumber,
+				body
+			});
+		} catch (error) {
+			this.handleError('github.commit.linkFailed', error);
+			throw error;
+		}
+	}
+
+	public async createIssue(fullName: string, input: { title: string; body: string; labels?: string[]; assignees?: string[] }): Promise<number> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			const response = await client.request('POST /repos/{owner}/{repo}/issues', {
+				owner,
+				repo,
+				title: input.title,
+				body: input.body,
+				labels: input.labels,
+				assignees: input.assignees
+			});
+			return (response.data as { number?: number }).number ?? 0;
+		} catch (error) {
+			this.handleError('github.issue.createFailed', error);
+			throw error;
+		}
+	}
+
+	public async updateIssueState(fullName: string, issueNumber: number, state: 'open' | 'closed'): Promise<void> {
+		const token = await this.requireToken();
+		const client = await this.createClient(token);
+		const { owner, repo } = this.parseRepository(fullName);
+		try {
+			await client.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
+				owner,
+				repo,
+				issue_number: issueNumber,
+				state
+			});
+			this.issueCache.clear();
+		} catch (error) {
+			this.handleError('github.issue.updateStateFailed', error);
+			throw error;
+		}
+	}
+
+	private toGraphqlPullRequestStates(state?: 'open' | 'closed' | 'all'): string[] {
+		switch (state) {
+			case 'all':
+				return ['OPEN', 'MERGED', 'CLOSED'];
+			case 'closed':
+				return ['CLOSED', 'MERGED'];
+			default:
+				return ['OPEN'];
+		}
+	}
+
+	private normalizePullRequestState(value: string | undefined): 'open' | 'closed' | 'merged' {
+		switch ((value ?? '').toUpperCase()) {
+			case 'MERGED':
+				return 'merged';
+			case 'CLOSED':
+				return 'closed';
+			default:
+				return 'open';
+		}
+	}
+
+	private pullRequestBodyHasIssueReference(fullName: string, body: string): boolean {
+		if (!body) {
+			return false;
+		}
+		const [owner, repo] = fullName.toLowerCase().split('/');
+		if (!owner || !repo) {
+			return false;
+		}
+		const normalizedBody = body.toLowerCase();
+		const crossRepoPattern = /([a-z0-9_.-]+\/[a-z0-9_.-]+)#(\d+)/gi;
+		let crossMatch: RegExpExecArray | null;
+		const seenIssues = new Set<number>();
+		while ((crossMatch = crossRepoPattern.exec(normalizedBody))) {
+			const targetRepo = crossMatch[1];
+			const issue = Number.parseInt(crossMatch[2], 10);
+			if (!Number.isFinite(issue)) {
+				continue;
+			}
+			if (targetRepo === `${owner}/${repo}`) {
+				seenIssues.add(issue);
+			}
+		}
+		if (seenIssues.size > 0) {
+			return true;
+		}
+		const localPattern = /#(\d+)/g;
+		let localMatch: RegExpExecArray | null;
+		while ((localMatch = localPattern.exec(normalizedBody))) {
+			const issue = Number.parseInt(localMatch[1], 10);
+			if (Number.isFinite(issue)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private async pullRequestHasLinkedIssues(client: any, owner: string, repo: string, pullNumber: number): Promise<boolean> {
+		try {
+			const events = await client.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/events', {
+				owner,
+				repo,
+				issue_number: pullNumber,
+				per_page: 100
+			}) as IssueEventResponse[];
+			return events.some(event => this.isLinkedIssueEvent(event));
+		} catch (error) {
+			this.handleError('github.pull.linkCheckFailed', error);
+			return false;
+		}
+	}
+
+	private isLinkedIssueEvent(event: IssueEventResponse | undefined): boolean {
+		if (!event) {
+			return false;
+		}
+		if (event.event === 'connected') {
+			return true;
+		}
+		if (event.event === 'cross-referenced') {
+			const issue = event.source?.issue;
+			if (issue && typeof issue.number === 'number') {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private extractCommitShasFromBody(body: string | undefined, owner: string, repo: string): string[] {
+		if (!body) {
+			return [];
+		}
+		const pattern = new RegExp(`https://github\\.com/${this.escapeForRegex(owner)}/${this.escapeForRegex(repo)}/commit/([0-9a-f]{7,40})`, 'ig');
+		const shas = new Set<string>();
+		let match: RegExpExecArray | null;
+		while ((match = pattern.exec(body))) {
+			const sha = match[1]?.trim();
+			if (sha) {
+				shas.add(sha);
+			}
+		}
+		return Array.from(shas);
+	}
+
+	private escapeForRegex(value: string): string {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	}
+
+	private normalizeUnlinkedPullRequestNode(node: any): UnlinkedPullRequest {
+		const prNumber = typeof node.number === 'number'
+			? node.number
+			: Number.parseInt(String(node.number ?? '0'), 10) || 0;
+		return {
+			number: prNumber,
+			title: node.title ?? `Pull Request #${node.number}`,
+			url: node.url ?? '',
+			state: this.normalizePullRequestState(node.state),
+			author: node.author?.login ?? undefined,
+			createdAt: node.createdAt ?? undefined,
+			updatedAt: node.updatedAt ?? undefined,
+			mergedAt: node.mergedAt ?? undefined,
+			additions: node.additions ?? 0,
+			deletions: node.deletions ?? 0,
+			changedFiles: node.changedFiles ?? 0,
+			commits: node.commits?.totalCount ?? 0,
+			headRefName: node.headRefName ?? undefined,
+			baseRefName: node.baseRefName ?? undefined
+		};
+	}
+
+	private normalizeUnlinkedCommitNode(node: any, fullName: string): UnlinkedCommit {
+		const sha: string = node.oid ?? '';
+		const defaultUrl = sha ? `https://github.com/${fullName}/commit/${sha}` : '';
+		return {
+			sha,
+			message: node.messageHeadline ?? (node.messageBody ? String(node.messageBody).split('\n')[0] : sha),
+			url: node.url ?? defaultUrl,
+			author: node.author?.user?.login ?? node.author?.name ?? undefined,
+			authoredDate: node.authoredDate ?? undefined,
+			committedDate: node.committedDate ?? undefined,
+			additions: node.additions ?? 0,
+			deletions: node.deletions ?? 0,
+			changedFiles: node.changedFiles ?? 0
+		};
 	}
 
 	private extractPullRequestNumber(event: IssueEventResponse): number | undefined {
@@ -371,6 +989,74 @@ export class GitHubClient {
 			return event.source.issue.number;
 		}
 		return undefined;
+	}
+
+	private extractCommitSha(event: IssueEventResponse): string | undefined {
+		const directSha = typeof event?.commit_id === 'string' && event.commit_id.length >= 7
+			? event.commit_id
+			: undefined;
+		if (directSha) {
+			return directSha;
+		}
+		const sourceType = event?.source?.type?.toLowerCase();
+		if (sourceType === 'commit') {
+			const sourceSha = event?.source?.commit?.sha;
+			if (typeof sourceSha === 'string' && sourceSha.length >= 7) {
+				return sourceSha;
+			}
+			const rawSourceUrl = event?.source?.commit?.url ?? event.commit_url ?? undefined;
+			const sourceUrl = typeof rawSourceUrl === 'string' ? rawSourceUrl : undefined;
+			const fromUrl = this.extractShaFromUrl(sourceUrl);
+			if (fromUrl) {
+				return fromUrl;
+			}
+		}
+		const fallbackUrl = typeof event?.commit_url === 'string' ? event.commit_url : undefined;
+		return this.extractShaFromUrl(fallbackUrl);
+	}
+
+	private extractShaFromUrl(url: string | undefined): string | undefined {
+		if (!url) {
+			return undefined;
+		}
+		const match = /commit\/([0-9a-f]{7,40})/i.exec(url);
+		return match ? match[1] : undefined;
+	}
+
+	private async fetchCommitRiskData(client: any, owner: string, repo: string, sha: string): Promise<CommitRiskData | undefined> {
+		const cacheKey = `${owner}/${repo}@${sha}`;
+		const cached = this.getFromCache(this.commitRiskCache, cacheKey);
+		if (cached) {
+			return cached;
+		}
+
+		try {
+			const response = await client.request('GET /repos/{owner}/{repo}/commits/{ref}', {
+				owner,
+				repo,
+				ref: sha
+			});
+			const data = response.data as any;
+			const record: CommitRiskData = {
+				sha: data.sha ?? sha,
+				message: data.commit?.message?.split('\n')[0] ?? data.commit?.message ?? sha,
+				url: data.html_url ?? `https://github.com/${owner}/${repo}/commit/${sha}`,
+				additions: data.stats?.additions ?? 0,
+				deletions: data.stats?.deletions ?? 0,
+				changedFiles: Array.isArray(data.files) ? data.files.length : 0,
+				author: data.author?.login ?? data.commit?.author?.name ?? undefined,
+				authoredDate: data.commit?.author?.date ?? undefined,
+				committedDate: data.commit?.committer?.date ?? undefined
+			};
+			if (!record.changedFiles && typeof data.stats?.total === 'number') {
+				record.changedFiles = data.stats.total;
+			}
+			this.storeInCache(this.commitRiskCache, cacheKey, record);
+			return record;
+		} catch (error) {
+			this.handleError('github.commit.fetchFailed', error);
+			return undefined;
+		}
 	}
 
 	private async fetchPullRequestRiskData(client: any, owner: string, repo: string, pullNumber: number): Promise<PullRequestRiskData | undefined> {

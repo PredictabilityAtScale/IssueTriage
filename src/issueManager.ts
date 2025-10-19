@@ -1,6 +1,15 @@
 import * as vscode from 'vscode';
 import { GitHubAuthService, GitHubSessionMetadata } from './services/githubAuthService';
-import { GitHubClient, IssueFilters, IssueSummary, RepositorySummary } from './services/githubClient';
+import {
+	GitHubClient,
+	IssueFilters,
+	IssueSummary,
+	RepositorySummary,
+	UnlinkedPullRequest,
+	UnlinkedCommit,
+	PullRequestBackfillDetail,
+	CommitBackfillDetail
+} from './services/githubClient';
 import { AssessmentService } from './services/assessmentService';
 import type { AssessmentRecord } from './services/assessmentStorage';
 import { SettingsService } from './services/settingsService';
@@ -47,12 +56,31 @@ interface IssueAssessmentSummary {
 	updatedAt: string;
 }
 
+interface UnlinkedWorkState {
+	loading: boolean;
+	pullRequests: UnlinkedPullRequest[];
+	commits: UnlinkedCommit[];
+	lastUpdated?: string;
+	error?: string;
+}
+
+interface BackfillIssueOptions {
+	close?: boolean;
+}
+
 interface DashboardMetrics {
 	totalIssuesAssessed: number;
 	averageComposite?: number;
 	assessmentsLastSevenDays: number;
 	readinessDistribution: Record<AssessmentReadiness, number>;
 }
+
+interface ResolvedUnlinkedRecord {
+	pulls: number[];
+	commits: string[];
+}
+
+type ResolvedUnlinkedState = Record<string, ResolvedUnlinkedRecord>;
 
 interface IssueManagerState {
 	loading: boolean;
@@ -72,14 +100,17 @@ interface IssueManagerState {
 	riskSummaries: Record<number, RiskSummary>;
 	assessmentSummaries: Record<number, IssueAssessmentSummary>;
 	dashboardMetrics?: DashboardMetrics;
+	unlinkedWork: UnlinkedWorkState;
 }
 
 const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
 const WORKSPACE_FILTER_KEY = 'issuetriage.repository.filters';
+const WORKSPACE_RESOLVED_UNLINKED_KEY = 'issuetriage.unlinked.resolved';
 const DEFAULT_FILTERS: FilterState = {
 	state: 'open',
 	readiness: 'all'
 };
+const DEFAULT_COMMIT_LOOKBACK_DAYS = 90;
 
 export class IssueManager implements vscode.Disposable {
 	private readonly emitter = new vscode.EventEmitter<IssueManagerState>();
@@ -95,10 +126,16 @@ export class IssueManager implements vscode.Disposable {
 		filters: { ...DEFAULT_FILTERS },
 		automationLaunchEnabled: false,
 		riskSummaries: {},
-		assessmentSummaries: {}
+		assessmentSummaries: {},
+		unlinkedWork: {
+			loading: false,
+			pullRequests: [],
+			commits: []
+		}
 	};
 	private allIssues: IssueSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
+	private resolvedUnlinked: ResolvedUnlinkedState = {};
 
 	constructor(
 		private readonly auth: GitHubAuthService,
@@ -111,6 +148,7 @@ export class IssueManager implements vscode.Disposable {
 		) {
 		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
 		this.disposables.push(riskSubscription);
+		this.resolvedUnlinked = this.stateService.getWorkspace<ResolvedUnlinkedState>(WORKSPACE_RESOLVED_UNLINKED_KEY, {}) ?? {};
 	}
 
 		public readonly onDidChangeState = this.emitter.event;
@@ -183,6 +221,7 @@ export class IssueManager implements vscode.Disposable {
 			await this.updateAssessmentData(fullName);
 			this.applyFilters();
 			await this.updateRiskSummaries(fullName);
+			await this.refreshUnlinkedWork(forceRefresh);
 			this.state.lastUpdated = new Date().toISOString();
 			this.state.error = undefined;
 			this.emitState();
@@ -293,12 +332,167 @@ export class IssueManager implements vscode.Disposable {
 			automationLaunchEnabled: this.readAutomationFlag(),
 			riskSummaries: {},
 			assessmentSummaries: {},
-			dashboardMetrics: undefined
+			dashboardMetrics: undefined,
+			unlinkedWork: {
+				loading: false,
+				pullRequests: [],
+				commits: []
+			}
 		};
 		this.allIssues = [];
+		this.resolvedUnlinked = {};
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, undefined);
 		await this.stateService.updateWorkspace(WORKSPACE_FILTER_KEY, undefined);
+		await this.stateService.updateWorkspace(WORKSPACE_RESOLVED_UNLINKED_KEY, undefined);
 		this.emitState();
+	}
+
+	public async linkPullRequestToIssue(pullNumber: number): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Connect to a repository before linking pull requests.');
+			return;
+		}
+		const issueNumber = await this.promptForIssueSelection(repository, `Select an issue to link to PR #${pullNumber}`);
+		if (!issueNumber) {
+			return;
+		}
+		try {
+			await this.github.linkPullRequestToIssue(repository, pullNumber, issueNumber);
+			await this.markPullRequestResolved(repository, pullNumber);
+			this.telemetry.trackEvent('issueManager.unlinked.pull.linked', {
+				repository,
+				pull: String(pullNumber),
+				issue: String(issueNumber)
+			});
+			void vscode.window.showInformationMessage(`Linked pull request #${pullNumber} to issue #${issueNumber}.`);
+			await this.refreshUnlinkedWork(true);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.unlinked.pull.linkError', {
+				repository,
+				pull: String(pullNumber),
+				message
+			});
+			void vscode.window.showErrorMessage(`Failed to link pull request #${pullNumber}: ${message}`);
+		}
+	}
+
+	public async createIssueFromPullRequest(pullNumber: number, options: BackfillIssueOptions = {}): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Connect to a repository before creating backfill issues.');
+			return;
+		}
+		const closeIssue = options.close ?? false;
+		try {
+			const detail = await this.github.getPullRequestBackfillDetail(repository, pullNumber);
+			const issuePayload = this.buildPullRequestBackfillIssue(repository, detail);
+			const issueNumber = await this.github.createIssue(repository, issuePayload);
+			await this.github.linkPullRequestToIssue(repository, pullNumber, issueNumber);
+			if (closeIssue) {
+				await this.github.updateIssueState(repository, issueNumber, 'closed');
+			}
+			await this.markPullRequestResolved(repository, pullNumber);
+			this.telemetry.trackEvent('issueManager.unlinked.pull.issueCreated', {
+				repository,
+				pull: String(pullNumber),
+				issue: String(issueNumber),
+				state: closeIssue ? 'closed' : 'open'
+			});
+			const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+			const action = 'Open Issue';
+			const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for pull request #${pullNumber}.`, action);
+			if (selection === action) {
+				void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+			}
+			await this.refreshUnlinkedWork(true);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.unlinked.pull.createError', {
+				repository,
+				pull: String(pullNumber),
+				message
+			});
+			void vscode.window.showErrorMessage(`Unable to create backfill issue for PR #${pullNumber}: ${message}`);
+		}
+	}
+
+	public async linkCommitToIssue(sha: string): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Connect to a repository before linking commits.');
+			return;
+		}
+		const shortSha = sha.slice(0, 7);
+		const issueNumber = await this.promptForIssueSelection(repository, `Select an issue to link commit ${shortSha}`);
+		if (!issueNumber) {
+			return;
+		}
+		try {
+			await this.github.linkCommitToIssue(repository, sha, issueNumber);
+			await this.markCommitResolved(repository, sha);
+			this.telemetry.trackEvent('issueManager.unlinked.commit.linked', {
+				repository,
+				commit: shortSha,
+				issue: String(issueNumber)
+			});
+			void vscode.window.showInformationMessage(`Linked commit ${shortSha} to issue #${issueNumber}.`);
+			await this.refreshUnlinkedWork(true);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.unlinked.commit.linkError', {
+				repository,
+				commit: shortSha,
+				message
+			});
+			void vscode.window.showErrorMessage(`Failed to link commit ${shortSha}: ${message}`);
+		}
+	}
+
+	public async createIssueFromCommit(sha: string, options: BackfillIssueOptions = {}): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Connect to a repository before creating backfill issues.');
+			return;
+		}
+		const shortSha = sha.slice(0, 7);
+		const closeIssue = options.close ?? false;
+		try {
+			const detail = await this.github.getCommitBackfillDetail(repository, sha);
+			const issuePayload = this.buildCommitBackfillIssue(repository, detail);
+			const issueNumber = await this.github.createIssue(repository, issuePayload);
+			await this.github.linkCommitToIssue(repository, sha, issueNumber);
+			if (closeIssue) {
+				await this.github.updateIssueState(repository, issueNumber, 'closed');
+			}
+			await this.markCommitResolved(repository, sha);
+			this.telemetry.trackEvent('issueManager.unlinked.commit.issueCreated', {
+				repository,
+				commit: shortSha,
+				issue: String(issueNumber),
+				state: closeIssue ? 'closed' : 'open'
+			});
+			const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+			const action = 'Open Issue';
+			const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for commit ${shortSha}.`, action);
+			if (selection === action) {
+				void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+			}
+			await this.refreshUnlinkedWork(true);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.unlinked.commit.createError', {
+				repository,
+				commit: shortSha,
+				message
+			});
+			void vscode.window.showErrorMessage(`Unable to create backfill issue for commit ${shortSha}: ${message}`);
+		}
+	}
+
+	public async refreshUnlinkedData(forceRefresh = true): Promise<void> {
+		await this.refreshUnlinkedWork(forceRefresh);
 	}
 
 	public dispose(): void {
@@ -355,6 +549,93 @@ export class IssueManager implements vscode.Disposable {
 				repository,
 				message
 			});
+		}
+	}
+
+	private async refreshUnlinkedWork(forceRefresh: boolean): Promise<void> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			this.state.unlinkedWork = {
+				loading: false,
+				pullRequests: [],
+				commits: [],
+				lastUpdated: undefined,
+				error: undefined
+			};
+			return;
+		}
+
+		const previous = this.state.unlinkedWork;
+		this.state.unlinkedWork = {
+			...previous,
+			loading: true,
+			error: undefined
+		};
+		this.emitState();
+
+		try {
+			const [pullRequests, commits] = await Promise.all([
+				this.github.listUnlinkedPullRequests(repository, { state: 'all', limit: 25 }, forceRefresh),
+				this.github.listCommitsWithoutPullRequests(repository, {
+					limit: 25,
+					since: this.calculateCommitLookbackIso()
+				}, forceRefresh)
+			]);
+			const repoKey = this.getResolvedStoreKey(repository);
+			const resolved = this.resolvedUnlinked[repoKey];
+			const filteredPullRequests = resolved
+				? pullRequests.filter(pr => !resolved.pulls.includes(pr.number))
+				: pullRequests;
+			const filteredCommits = resolved
+				? commits.filter(commit => !resolved.commits.includes(commit.sha))
+				: commits;
+			this.state.unlinkedWork = {
+				loading: false,
+				pullRequests: filteredPullRequests,
+				commits: filteredCommits,
+				lastUpdated: new Date().toISOString(),
+				error: undefined
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.state.unlinkedWork = {
+				...previous,
+				loading: false,
+				error: message
+			};
+			this.telemetry.trackEvent('issueManager.unlinked.refreshFailed', {
+				repository,
+				message
+			});
+		}
+		this.emitState();
+	}
+
+	private async promptForIssueSelection(repository: string, placeHolder: string): Promise<number | undefined> {
+		try {
+			const issues = await this.github.listIssues(repository, { state: 'all' }, true);
+			if (!issues.length) {
+				void vscode.window.showInformationMessage('No issues available to link yet. Create an issue first.');
+				return undefined;
+			}
+			const items = issues.slice(0, 200).map(issue => ({
+				label: `#${issue.number} · ${issue.title}`,
+				description: issue.state === 'closed' ? 'Closed' : 'Open',
+				issueNumber: issue.number
+			}));
+			const selection = await vscode.window.showQuickPick(items, {
+				placeHolder,
+				matchOnDescription: true
+			});
+			return selection?.issueNumber;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.unlinked.issuePickFailed', {
+				repository,
+				message
+			});
+			void vscode.window.showErrorMessage(`Unable to list issues: ${message}`);
+			return undefined;
 		}
 	}
 
@@ -471,6 +752,150 @@ export class IssueManager implements vscode.Disposable {
 		return Array.from(new Set(values.filter(Boolean)));
 	}
 
+	private async markPullRequestResolved(repository: string, pullNumber: number): Promise<void> {
+		const repoKey = this.getResolvedStoreKey(repository);
+		const record = this.resolvedUnlinked[repoKey] ?? { pulls: [], commits: [] };
+		if (!record.pulls.includes(pullNumber)) {
+			record.pulls.push(pullNumber);
+			this.resolvedUnlinked[repoKey] = record;
+			await this.persistResolvedUnlinked();
+		}
+		this.state.unlinkedWork = {
+			...this.state.unlinkedWork,
+			pullRequests: this.state.unlinkedWork.pullRequests.filter(pr => pr.number !== pullNumber)
+		};
+		this.emitState();
+	}
+
+	private async markCommitResolved(repository: string, sha: string): Promise<void> {
+		const repoKey = this.getResolvedStoreKey(repository);
+		const record = this.resolvedUnlinked[repoKey] ?? { pulls: [], commits: [] };
+		if (!record.commits.includes(sha)) {
+			record.commits.push(sha);
+			this.resolvedUnlinked[repoKey] = record;
+			await this.persistResolvedUnlinked();
+		}
+		this.state.unlinkedWork = {
+			...this.state.unlinkedWork,
+			commits: this.state.unlinkedWork.commits.filter(commit => commit.sha !== sha)
+		};
+		this.emitState();
+	}
+
+	private getResolvedStoreKey(repository: string): string {
+		return this.normalizeRepositorySlug(repository) ?? repository.toLowerCase();
+	}
+
+	private async persistResolvedUnlinked(): Promise<void> {
+		await this.stateService.updateWorkspace(WORKSPACE_RESOLVED_UNLINKED_KEY, this.resolvedUnlinked);
+	}
+
+	private calculateCommitLookbackIso(): string {
+		const configured = this.settings.get<number>('backfill.commitWindowDays');
+		const days = (typeof configured === 'number' && Number.isFinite(configured) && configured > 0)
+			? configured
+			: DEFAULT_COMMIT_LOOKBACK_DAYS;
+		const millis = days * 24 * 60 * 60 * 1000;
+		return new Date(Date.now() - millis).toISOString();
+	}
+
+	private buildPullRequestBackfillIssue(repository: string, detail: PullRequestBackfillDetail): { title: string; body: string } {
+		const sanitizedTitle = detail.title?.trim() || `Pull Request #${detail.number}`;
+		const shortTitle = sanitizedTitle.length > 70 ? `${sanitizedTitle.slice(0, 67)}…` : sanitizedTitle;
+		const title = `Backfill: PR #${detail.number} ${shortTitle}`;
+		const lines: string[] = [];
+		lines.push('## Source Pull Request');
+		lines.push(`- Repository: ${repository}`);
+		lines.push(`- Pull Request: [#${detail.number}](${detail.url})`);
+		lines.push(`- Author: ${detail.author ?? 'unknown'}`);
+		lines.push(`- State: ${detail.state}`);
+		lines.push(`- Created: ${this.formatIsoForBody(detail.createdAt)}`);
+		lines.push(`- Updated: ${this.formatIsoForBody(detail.updatedAt)}`);
+		if (detail.mergedAt) {
+			lines.push(`- Merged: ${this.formatIsoForBody(detail.mergedAt)}`);
+		}
+		lines.push('');
+		lines.push('## Summary of Changes');
+		const summary = detail.bodyText?.trim() || detail.body?.trim();
+		lines.push(summary && summary.length ? summary : '_No description provided._');
+		lines.push('');
+		lines.push('## Change Statistics');
+		lines.push(`- Commits: ${detail.commits}`);
+		lines.push(`- Files changed: ${detail.changedFiles}`);
+		lines.push(`- Additions: ${detail.additions}`);
+		lines.push(`- Deletions: ${detail.deletions}`);
+		lines.push('');
+		lines.push('## Key Files');
+		if (detail.files.length) {
+			const maxFiles = 10;
+			detail.files.slice(0, maxFiles).forEach(file => {
+				lines.push(`- ${file.path} (+${file.additions}/-${file.deletions})`);
+			});
+			if (detail.files.length > maxFiles) {
+				lines.push(`- …and ${detail.files.length - maxFiles} more files`);
+			}
+		} else {
+			lines.push('- _No file data available._');
+		}
+		lines.push('');
+		lines.push('## Next Steps');
+		lines.push('- [ ] Link this issue to risk analysis categories.');
+		lines.push('- [ ] Triage outstanding tasks for this change set.');
+		return { title, body: lines.join('\n') };
+	}
+
+	private buildCommitBackfillIssue(repository: string, detail: CommitBackfillDetail): { title: string; body: string } {
+		const shortSha = detail.sha.slice(0, 7);
+		const messageTitle = detail.message?.trim() || shortSha;
+		const truncatedTitle = messageTitle.length > 70 ? `${messageTitle.slice(0, 67)}…` : messageTitle;
+		const title = `Backfill: Commit ${shortSha} ${truncatedTitle}`;
+		const lines: string[] = [];
+		lines.push('## Source Commit');
+		lines.push(`- Repository: ${repository}`);
+		lines.push(`- Commit: [${detail.sha}](${detail.url})`);
+		lines.push(`- Author: ${detail.author ?? 'unknown'}`);
+		lines.push(`- Authored: ${this.formatIsoForBody(detail.authoredDate)}`);
+		lines.push(`- Committed: ${this.formatIsoForBody(detail.committedDate)}`);
+		lines.push('');
+		lines.push('## Summary of Changes');
+		const summary = detail.messageBody?.trim();
+		lines.push(summary && summary.length ? summary : detail.message ?? '_No description provided._');
+		lines.push('');
+		lines.push('## Change Statistics');
+		lines.push(`- Files changed: ${detail.changedFiles}`);
+		lines.push(`- Additions: ${detail.additions}`);
+		lines.push(`- Deletions: ${detail.deletions}`);
+		lines.push('');
+		lines.push('## Key Files');
+		if (detail.files.length) {
+			const maxFiles = 12;
+			detail.files.slice(0, maxFiles).forEach(file => {
+				lines.push(`- ${file.path} (+${file.additions}/-${file.deletions})`);
+			});
+			if (detail.files.length > maxFiles) {
+				lines.push(`- …and ${detail.files.length - maxFiles} more files`);
+			}
+		} else {
+			lines.push('- _No file data available._');
+		}
+		lines.push('');
+		lines.push('## Next Steps');
+		lines.push('- [ ] Review this commit and capture outstanding work.');
+		lines.push('- [ ] Evaluate automation readiness once context is in place.');
+		return { title, body: lines.join('\n') };
+	}
+
+	private formatIsoForBody(value?: string): string {
+		if (!value) {
+			return 'n/a';
+		}
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) {
+			return value;
+		}
+		return date.toISOString();
+	}
+
 	private setLoading(loading: boolean): void {
 		this.state.loading = loading;
 		this.emitState();
@@ -510,7 +935,12 @@ export class IssueManager implements vscode.Disposable {
 					...this.state.dashboardMetrics,
 					readinessDistribution: { ...this.state.dashboardMetrics.readinessDistribution }
 				}
-				: undefined
+				: undefined,
+			unlinkedWork: {
+				...this.state.unlinkedWork,
+				pullRequests: [...this.state.unlinkedWork.pullRequests],
+				commits: [...this.state.unlinkedWork.commits]
+			}
 		});
 	}
 

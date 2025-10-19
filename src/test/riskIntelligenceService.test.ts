@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { RiskIntelligenceService } from '../services/riskIntelligenceService';
 import type { RiskProfileStore } from '../services/riskStorage';
-import type { IssueRiskSnapshot, PullRequestRiskData, IssueSummary } from '../services/githubClient';
+import type { IssueRiskSnapshot, PullRequestRiskData, CommitRiskData, IssueSummary } from '../services/githubClient';
 import type { RiskProfile } from '../types/risk';
 
 type SettingsRecord = Record<string, unknown>;
@@ -102,7 +102,8 @@ suite('RiskIntelligenceService', () => {
 		];
 		const snapshot: IssueRiskSnapshot = {
 			issueNumber: 42,
-			pullRequests
+			pullRequests,
+			commits: []
 		};
 		const github = new FakeGitHubClient(new Map([[ 'owner/repo#42', snapshot ]]));
 		const settings = new StubSettings({ 'risk.lookbackDays': 180 });
@@ -135,11 +136,70 @@ suite('RiskIntelligenceService', () => {
 		assert.strictEqual(summary?.riskLevel, 'high');
 		assert.ok(summary?.metrics);
 		assert.strictEqual(summary?.metrics?.prCount, 2);
+		assert.strictEqual(summary?.metrics?.directCommitCount, 0);
 
 		const profile = await service.getProfile('owner/repo', 42);
 		assert.ok(profile);
 		assert.strictEqual(profile?.metrics.prCount, 2);
+		assert.strictEqual(profile?.metrics.directCommitCount, 0);
 		assert.strictEqual(profile?.metrics.changeVolume, 1200);
+		assert.strictEqual(profile?.metrics.directCommitChangeVolume, 0);
+	});
+
+	test('uses direct commits when no pull requests are linked', async () => {
+		const store = new MemoryRiskStore();
+		const commits: CommitRiskData[] = [
+			{
+				sha: 'abc123def456',
+				message: 'Backfill hotfix for production',
+				url: 'https://example.com/commit/abc123',
+				additions: 600,
+				deletions: 150,
+				changedFiles: 40,
+				author: 'octocat',
+				authoredDate: new Date().toISOString(),
+				committedDate: new Date().toISOString()
+			}
+		];
+		const snapshot: IssueRiskSnapshot = {
+			issueNumber: 77,
+			pullRequests: [],
+			commits
+		};
+		const github = new FakeGitHubClient(new Map([[ 'owner/repo#77', snapshot ]]));
+		const settings = new StubSettings({ 'risk.lookbackDays': 90 });
+		const telemetry = new StubTelemetry();
+		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
+
+		const issues: IssueSummary[] = [
+			{
+				number: 77,
+				title: 'Legacy backfill',
+				url: 'https://example.com/issue/77',
+				labels: [],
+				assignees: [],
+				milestone: undefined,
+				updatedAt: new Date().toISOString(),
+				state: 'open'
+			}
+		];
+
+		await service.primeIssues('owner/repo', issues);
+		await service.waitForIdle();
+
+		const summary = service.getSummary('owner/repo', 77);
+		assert.ok(summary);
+		assert.strictEqual(summary?.status, 'ready');
+		assert.ok(summary?.metrics);
+		assert.strictEqual(summary?.metrics?.prCount, 0);
+		assert.strictEqual(summary?.metrics?.directCommitCount, 1);
+		assert.strictEqual(summary?.riskLevel, 'medium');
+
+		const profile = await service.getProfile('owner/repo', 77);
+		assert.ok(profile);
+		assert.strictEqual(profile?.metrics.directCommitCount, 1);
+		assert.strictEqual(profile?.metrics.changeVolume, 750);
+		assert.strictEqual(profile?.metrics.directCommitChangeVolume, 750);
 	});
 
 	test('skips issues outside lookback window', async () => {

@@ -113,13 +113,15 @@
 
 ### GitHub Data Collection
 - For each enqueued issue:
-  1. `GitHubClient.getIssueRiskSnapshot` fetches relevant pull requests.
+  1. `GitHubClient.getIssueRiskSnapshot` fetches relevant pull requests and direct commits.
      - REST sequence:
        - `GET /repos/{owner}/{repo}/issues/{issue_number}/events` (paginated, 100 per page) to find linked PR numbers.
        - For each PR number:
          - `GET /repos/{owner}/{repo}/pulls/{pull_number}` to obtain statistics (additions, deletions, changed files, commits, comments).
          - `GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews` to aggregate review states.
-  2. Missing PRs ⇒ summary `skipped` with message "No linked pull requests found..." and telemetry `risk.skippedNoPRs`.
+      - Commit references (evaluated when no PRs are present):
+        - `GET /repos/{owner}/{repo}/commits/{ref}` for up to 30 unique commit SHAs referenced by the issue.
+  2. Missing change history ⇒ summary `skipped` with message "No linked pull requests or commits found. Risk analysis requires recent change history." and telemetry `risk.skippedNoHistory`.
 
 ### Risk Profile Construction
 - `buildProfile` composes:
