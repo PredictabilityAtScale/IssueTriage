@@ -1,6 +1,6 @@
 // @ts-check
 (function() {
-	const vscodeApi = acquireVsCodeApi();
+	const vscodeApi = (/** @type {any} */ (window)).acquireVsCodeApi();
 
 	/**
 	 * @template {HTMLElement} T
@@ -814,6 +814,12 @@
 		}
 		const showPanel = currentTab === 'unlinked';
 		backfillPanel.hidden = !showPanel;
+		backfillPanel.style.display = showPanel ? '' : 'none';
+		if (!showPanel) {
+			backfillPanel.setAttribute('aria-busy', 'false');
+			refreshBackfillButton.disabled = false;
+			return;
+		}
 		const repository = state?.selectedRepository?.fullName;
 		const work = state?.unlinkedWork ?? { loading: false, pullRequests: [], commits: [] };
 		if (!repository) {
