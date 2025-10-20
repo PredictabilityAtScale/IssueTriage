@@ -225,7 +225,7 @@ export class AssessmentService {
 
 		const recommendationLines = assessment.recommendations.length
 			? assessment.recommendations.map((item: string) => `- ${item}`)
-			: ['- No immediate actions recommended.'];
+			: ['- No open questions identified.'];
 
 		return [
 			COMMENT_TAG,
@@ -238,7 +238,7 @@ export class AssessmentService {
 			'',
 			`**Summary:** ${assessment.summary}`,
 			'',
-			'**Recommendations:**',
+			'**Pre-implementation questions:**',
 			...recommendationLines,
 			'',
 			`_Last updated: ${new Date().toLocaleString()}_`
@@ -327,8 +327,7 @@ export class AssessmentService {
   "recommendations": string[]
 }
  Scores must be 0-100 numbers with one decimal precision. Base composite on the other four dimensions. Provide concise summary (max 4 sentences).
- Recommendations must focus on actions that increase the issue's readiness for completion by an autonomous AI coding agent (e.g. clarify requirements, surface acceptance tests, provide environment details, add safety guardrails, enumerate validation/rollback steps).
- Include up to five actionable recommendations.
+ Recommendations must instead be the minimum set of high-leverage questions that must be answered before an autonomous AI coding agent should begin implementation. Each question should highlight missing context, validation expectations, safety requirements, or deployment guardrails the agent needs resolved first. Keep the list focused (max five questions).
 `;
 	}
 

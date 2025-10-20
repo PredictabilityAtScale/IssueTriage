@@ -1729,7 +1729,7 @@ class IssueTriagePanel {
 
 		const recommendationLines = record.recommendations.length
 			? record.recommendations.map(item => `- ${item}`)
-			: ['- No immediate actions recommended.'];
+			: ['- No open questions identified.'];
 
 		const riskLines = this.createMarkdownRiskSection(riskSummary);
 
@@ -1746,7 +1746,7 @@ class IssueTriagePanel {
 		if (readiness.description) {
 			sections.push(readiness.description);
 		}
-		sections.push('', ...tableLines, '', `Model: ${record.model}`, `Assessment Run: ${assessedAt}`, '', '## Summary', record.summary || 'No summary provided.', '', '## Recommendations', ...recommendationLines, '', ...riskLines, '', '## References', `- Issue: ${issue.url}`);
+		sections.push('', ...tableLines, '', `Model: ${record.model}`, `Assessment Run: ${assessedAt}`, '', '## Summary', record.summary || 'No summary provided.', '', '## Pre-implementation Questions', ...recommendationLines, '', ...riskLines, '', '## References', `- Issue: ${issue.url}`);
 
 		if (commentUrl) {
 			sections.push(`- Latest comment: ${commentUrl}`);

@@ -1263,7 +1263,7 @@
 		const readiness = getReadiness(data.compositeScore);
 		const updatedAt = new Date(data.createdAt).toLocaleString();
 		const issueUrl = getIssueUrl(data.issueNumber);
-		const recommendations = (data.recommendations && data.recommendations.length ? data.recommendations : ['No immediate actions recommended.']).map(/** @param {any} item */ item => '<li>' + item + '</li>').join('');
+		const recommendations = (data.recommendations && data.recommendations.length ? data.recommendations : ['No open questions identified.']).map(/** @param {any} item */ item => '<li>' + item + '</li>').join('');
 		const lines = [
 			'<div>',
 			'<h2>Assessment · #' + data.issueNumber + '</h2>',
@@ -1283,7 +1283,7 @@
 			'<p>' + data.summary + '</p>',
 			'</div>',
 			'<div>',
-			'<h3>Recommendations</h3>',
+			'<h3>Pre-implementation questions</h3>',
 			'<ul class="recommendations-list">' + recommendations + '</ul>',
 			'</div>',
 			'<div class="assessment-actions">'
