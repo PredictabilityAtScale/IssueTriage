@@ -38,6 +38,8 @@
 	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
 	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
+	const analysisActions = /** @type {HTMLElement} */ (requireElement('analysisActions'));
+	const runAnalysisButton = /** @type {HTMLButtonElement} */ (requireElement('runAnalysisButton'));
 
 
 	const READINESS_OPTIONS = [
@@ -85,6 +87,7 @@
 	let issueStateFilter = 'open';
 	/** @type {number | undefined} */
 	let searchDebounceHandle = undefined;
+	let bulkAssessmentPending = false;
 
 	window.addEventListener('message', event => {
 		const message = event.data;
@@ -123,6 +126,10 @@
 				break;
 			case 'assessment.historyError':
 				console.warn('[IssueTriage] Failed to load assessment history:', message.message);
+				break;
+			case 'assessment.bulkComplete':
+				bulkAssessmentPending = false;
+				refreshRunAnalysisControls();
 				break;
 			default:
 				break;
@@ -230,6 +237,21 @@
 		}
 	});
 
+	runAnalysisButton.addEventListener('click', () => {
+		if (!latestState) {
+			return;
+		}
+		const candidates = getUnanalyzedOpenIssues(5);
+		const issueNumbers = candidates.map(candidate => candidate.number);
+		if (!issueNumbers.length) {
+			vscodeApi.postMessage({ type: 'webview.runBulkAssessment', issueNumbers: [] });
+			return;
+		}
+		bulkAssessmentPending = true;
+		refreshRunAnalysisControls();
+		vscodeApi.postMessage({ type: 'webview.runBulkAssessment', issueNumbers });
+	});
+
 	function updateStateTabs() {
 		const openSelected = currentTab === 'open';
 		const closedSelected = currentTab === 'closed';
@@ -240,6 +262,60 @@
 		closedTab.setAttribute('aria-pressed', closedSelected ? 'true' : 'false');
 		unlinkedTab.classList.toggle('active', unlinkedSelected);
 		unlinkedTab.setAttribute('aria-pressed', unlinkedSelected ? 'true' : 'false');
+	}
+
+	/**
+	 * @param {number} [limit]
+	 * @returns {Array<{ number: number }>}
+	 */
+	function getUnanalyzedOpenIssues(limit = 5) {
+		if (!latestState) {
+			return [];
+		}
+		const issues = Array.isArray(latestState.issues) ? latestState.issues : [];
+		const summaries = latestState.assessmentSummaries ?? {};
+		const result = [];
+		for (const issue of issues) {
+			if (issue.state === 'closed') {
+				continue;
+			}
+			if (summaries[issue.number]) {
+				continue;
+			}
+			result.push(issue);
+			if (result.length >= limit) {
+				break;
+			}
+		}
+		return result;
+	}
+
+	function refreshRunAnalysisControls() {
+		const hidden = currentTab !== 'open';
+		analysisActions.hidden = hidden;
+		if (hidden) {
+			runAnalysisButton.disabled = false;
+			runAnalysisButton.setAttribute('aria-disabled', 'false');
+			runAnalysisButton.textContent = 'Run Analysis';
+			runAnalysisButton.title = 'Run IssueTriage analysis for the first five unanalyzed open issues.';
+			return;
+		}
+		const hasRepository = Boolean(latestState && latestState.selectedRepository);
+		const loading = Boolean(latestState && latestState.loading);
+		const eligibleCount = getUnanalyzedOpenIssues(5).length;
+		const shouldDisable = bulkAssessmentPending || loading || !hasRepository || eligibleCount === 0;
+		runAnalysisButton.disabled = shouldDisable;
+		runAnalysisButton.setAttribute('aria-disabled', shouldDisable ? 'true' : 'false');
+		runAnalysisButton.textContent = bulkAssessmentPending ? 'Running…' : 'Run Analysis';
+		if (!hasRepository) {
+			runAnalysisButton.title = 'Connect a repository to run analysis.';
+		} else if (eligibleCount === 0) {
+			runAnalysisButton.title = 'No unanalyzed open issues are ready for analysis.';
+		} else if (bulkAssessmentPending) {
+			runAnalysisButton.title = 'Running IssueTriage analysis…';
+		} else {
+			runAnalysisButton.title = 'Run IssueTriage analysis for the first five unanalyzed open issues.';
+		}
 	}
 
 	issueList.addEventListener('click', event => {
@@ -594,6 +670,7 @@
 			}
 		}
 
+		refreshRunAnalysisControls();
 		renderBackfillPanel(state);
 		enforceSelection();
 		renderRiskDisplay(selectedIssueNumber);

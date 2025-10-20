@@ -477,6 +477,16 @@ class IssueTriagePanel {
 				position: relative;
 			}
 
+			.analysis-actions {
+				display: flex;
+				justify-content: flex-end;
+				align-items: center;
+			}
+
+			.analysis-actions[hidden] {
+				display: none;
+			}
+
 			.overview-grid {
 				display: grid;
 				gap: 12px;
@@ -1255,6 +1265,9 @@ class IssueTriagePanel {
 			<div class="container">
 				<div class="issue-list-panel" aria-label="Issue list and overview">
 					<div id="issueSummary" class="meta-row" role="status" aria-live="polite"></div>
+					<div id="analysisActions" class="analysis-actions" hidden>
+						<button id="runAnalysisButton" class="compact-button" type="button">Run Analysis</button>
+					</div>
 					<h2 class="visually-hidden" id="overviewHeading">Overview metrics</h2>
 					<section id="overviewMetrics" class="overview-grid" aria-labelledby="overviewHeading" aria-live="polite"></section>
 					<h2 class="visually-hidden" id="issueListHeading">Issues</h2>
@@ -1448,6 +1461,88 @@ class IssueTriagePanel {
 						message: messageText
 					});
 					vscode.window.showErrorMessage(`Assessment failed: ${messageText}`);
+				}
+				break;
+			}
+			case 'webview.runBulkAssessment': {
+				const rawValues = Array.isArray(message.issueNumbers) ? message.issueNumbers : [];
+				const issueNumbers = rawValues
+					.map(value => this.parseIssueNumber(value))
+					.filter((value): value is number => typeof value === 'number' && value > 0);
+				const uniqueIssueNumbers = Array.from(new Set(issueNumbers)).slice(0, 5);
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName;
+				if (!repository) {
+					void vscode.window.showWarningMessage('Select a repository before running an assessment.');
+					this.panel.webview.postMessage({ type: 'assessment.bulkComplete' });
+					break;
+				}
+				if (!uniqueIssueNumbers.length) {
+					void vscode.window.showInformationMessage('No unanalyzed open issues are ready for analysis.');
+					this.panel.webview.postMessage({ type: 'assessment.bulkComplete' });
+					break;
+				}
+				this.services.telemetry.trackEvent('assessment.bulkRun.requested', {
+					repository,
+					total: String(uniqueIssueNumbers.length)
+				});
+				const successes: number[] = [];
+				const failures: Array<{ issue: number; message: string }> = [];
+				try {
+					await vscode.window.withProgress({
+						title: `Running IssueTriage analysis (${uniqueIssueNumbers.length})`,
+						location: vscode.ProgressLocation.Notification
+					}, async progress => {
+						let completed = 0;
+						for (const issueNumber of uniqueIssueNumbers) {
+							completed += 1;
+							progress.report({ message: `Assessing #${issueNumber} (${completed}/${uniqueIssueNumbers.length})` });
+							this.panel.webview.postMessage({ type: 'assessment.loading', issueNumber });
+							try {
+								const record = await this.services.assessment.assessIssue(repository, issueNumber);
+								IssueTriagePanel.broadcastAssessment(record);
+								successes.push(issueNumber);
+							} catch (error) {
+								const messageText = formatAssessmentError(error);
+								failures.push({ issue: issueNumber, message: messageText });
+								this.panel.webview.postMessage({
+									type: 'assessment.error',
+									issueNumber,
+									message: messageText
+								});
+							}
+						}
+					});
+					const successCount = successes.length;
+					const failureCount = failures.length;
+					if (successCount > 0) {
+						const successMessage = successCount === 1
+							? `Completed assessment for issue #${successes[0]}.`
+							: `Completed assessments for ${successCount} issues.`;
+						void vscode.window.showInformationMessage(successMessage);
+					}
+					if (failureCount > 0) {
+						const detail = failures
+							.slice(0, 3)
+							.map(item => `#${item.issue}: ${item.message}`)
+							.join('; ');
+						const suffix = failureCount > 3 ? `; +${failureCount - 3} more` : '';
+						void vscode.window.showErrorMessage(`Assessments failed for ${failureCount} issue${failureCount === 1 ? '' : 's'}: ${detail}${suffix}`);
+					}
+					this.services.telemetry.trackEvent('assessment.bulkRun.completed', {
+						repository,
+						successCount: String(successes.length),
+						failureCount: String(failures.length)
+					});
+				} finally {
+					await this.services.issueManager.refreshAssessments();
+					this.panel.webview.postMessage({
+						type: 'assessment.bulkComplete',
+						summary: {
+							successCount: successes.length,
+							failureCount: failures.length
+						}
+					});
 				}
 				break;
 			}
