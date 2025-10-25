@@ -25,6 +25,8 @@
 	const readinessFilter = /** @type {HTMLSelectElement} */ (requireElement('readinessFilter'));
 	const issueList = /** @type {HTMLElement} */ (requireElement('issueList'));
 	issueList.setAttribute('aria-multiselectable', 'false');
+	const issuesPanel = /** @type {HTMLElement} */ (requireElement('issuesPanel'));
+	const mainContainer = /** @type {HTMLElement} */ (requireElement('mainContainer'));
 	const emptyState = /** @type {HTMLElement} */ (requireElement('emptyState'));
 	const issueSummary = /** @type {HTMLElement} */ (requireElement('issueSummary'));
 	const loadingState = /** @type {HTMLElement} */ (requireElement('loadingState'));
@@ -35,11 +37,28 @@
 	const openTab = /** @type {HTMLButtonElement} */ (requireElement('openTab'));
 	const closedTab = /** @type {HTMLButtonElement} */ (requireElement('closedTab'));
 	const unlinkedTab = /** @type {HTMLButtonElement} */ (requireElement('unlinkedTab'));
+	const mlTrainingTab = /** @type {HTMLButtonElement} */ (requireElement('mlTrainingTab'));
 	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
 	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
 	const analysisActions = /** @type {HTMLElement} */ (requireElement('analysisActions'));
 	const runAnalysisButton = /** @type {HTMLButtonElement} */ (requireElement('runAnalysisButton'));
+	const mlTrainingPanel = /** @type {HTMLElement} */ (requireElement('mlTrainingPanel'));
+	const backfillMissingButton = /** @type {HTMLButtonElement} */ (requireElement('backfillMissingButton'));
+	const backfillAllButton = /** @type {HTMLButtonElement} */ (requireElement('backfillAllButton'));
+	const cancelBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('cancelBackfillButton'));
+	const exportDatasetButton = /** @type {HTMLButtonElement} */ (requireElement('exportDatasetButton'));
+	const downloadDatasetButton = /** @type {HTMLButtonElement} */ (requireElement('downloadDatasetButton'));
+	const backfillProgress = /** @type {HTMLElement} */ (requireElement('backfillProgress'));
+	const backfillProgressBar = /** @type {HTMLElement} */ (requireElement('backfillProgressBar'));
+	const backfillStatus = /** @type {HTMLElement} */ (requireElement('backfillStatus'));
+	const backfillResults = /** @type {HTMLElement} */ (requireElement('backfillResults'));
+	const exportResults = /** @type {HTMLElement} */ (requireElement('exportResults'));
+	const downloadResults = /** @type {HTMLElement} */ (requireElement('downloadResults'));
+	const totalIssuesCount = /** @type {HTMLElement} */ (requireElement('totalIssuesCount'));
+	const keywordCoverageCount = /** @type {HTMLElement} */ (requireElement('keywordCoverageCount'));
+	const keywordCoveragePct = /** @type {HTMLElement} */ (requireElement('keywordCoveragePct'));
+	const lastExport = /** @type {HTMLElement} */ (requireElement('lastExport'));
 
 
 	const READINESS_OPTIONS = [
@@ -130,6 +149,28 @@
 			case 'assessment.bulkComplete':
 				bulkAssessmentPending = false;
 				refreshRunAnalysisControls();
+				break;
+			case 'ml.keywordStats':
+				if (message.stats) {
+					updateKeywordStats(message.stats);
+				}
+				break;
+			case 'ml.backfillProgress':
+				if (message.progress) {
+					updateBackfillProgress(message.progress);
+				}
+				break;
+			case 'ml.backfillComplete':
+				handleBackfillComplete(message);
+				break;
+			case 'ml.lastExport':
+				renderLastExport(message.record);
+				break;
+			case 'ml.exportComplete':
+				handleExportComplete(message);
+				break;
+			case 'ml.downloadComplete':
+				handleDownloadComplete(message);
 				break;
 			default:
 				break;
@@ -237,6 +278,20 @@
 		}
 	});
 
+	mlTrainingTab.addEventListener('click', () => {
+		if (currentTab === 'mlTraining') {
+			return;
+		}
+		console.log('[IssueTriage] Switching to ML Training tab');
+		currentTab = 'mlTraining';
+		updateStateTabs();
+		if (latestState) {
+			renderState(latestState);
+		}
+		loadKeywordStats();
+		loadLastExport();
+	});
+
 	runAnalysisButton.addEventListener('click', () => {
 		if (!latestState) {
 			return;
@@ -256,12 +311,15 @@
 		const openSelected = currentTab === 'open';
 		const closedSelected = currentTab === 'closed';
 		const unlinkedSelected = currentTab === 'unlinked';
+		const mlTrainingSelected = currentTab === 'mlTraining';
 		openTab.classList.toggle('active', openSelected);
 		openTab.setAttribute('aria-pressed', openSelected ? 'true' : 'false');
 		closedTab.classList.toggle('active', closedSelected);
 		closedTab.setAttribute('aria-pressed', closedSelected ? 'true' : 'false');
 		unlinkedTab.classList.toggle('active', unlinkedSelected);
 		unlinkedTab.setAttribute('aria-pressed', unlinkedSelected ? 'true' : 'false');
+		mlTrainingTab.classList.toggle('active', mlTrainingSelected);
+		mlTrainingTab.setAttribute('aria-pressed', mlTrainingSelected ? 'true' : 'false');
 	}
 
 	/**
@@ -467,6 +525,14 @@
 			if (commentUrl) {
 				vscodeApi.postMessage({ type: 'webview.openUrl', url: commentUrl });
 			}
+		} else if (action === 'copyForAI') {
+			if (typeof selectedIssueNumber === 'number') {
+				vscodeApi.postMessage({ type: 'webview.copyIssueForAI', issueNumber: selectedIssueNumber });
+			}
+		} else if (action === 'sendToAI') {
+			if (typeof selectedIssueNumber === 'number') {
+				vscodeApi.postMessage({ type: 'webview.sendToAI', issueNumber: selectedIssueNumber });
+			}
 		} else if (action === 'exportMarkdown') {
 			if (typeof selectedIssueNumber === 'number') {
 				vscodeApi.postMessage({ type: 'webview.exportAssessment', issueNumber: selectedIssueNumber, format: 'markdown' });
@@ -480,6 +546,83 @@
 
 	refreshBackfillButton.addEventListener('click', () => {
 		vscodeApi.postMessage({ type: 'webview.refreshUnlinked' });
+	});
+
+	/**
+	 * @param {boolean} disabled
+	 */
+	function setBackfillButtonsDisabled(disabled) {
+		backfillMissingButton.disabled = disabled;
+		backfillAllButton.disabled = disabled;
+	}
+
+	backfillMissingButton.addEventListener('click', () => {
+		setBackfillButtonsDisabled(true);
+		cancelBackfillButton.disabled = false;
+		backfillProgress.hidden = false;
+		backfillProgressBar.style.width = '0%';
+		backfillStatus.textContent = 'Preparing keyword backfill...';
+		backfillResults.innerHTML = '';
+		vscodeApi.postMessage({ type: 'webview.backfillKeywords', mode: 'missing' });
+	});
+
+	backfillAllButton.addEventListener('click', () => {
+		setBackfillButtonsDisabled(true);
+		cancelBackfillButton.disabled = false;
+		backfillProgress.hidden = false;
+		backfillProgressBar.style.width = '0%';
+		backfillStatus.textContent = 'Preparing keyword backfill...';
+		backfillResults.innerHTML = '';
+		vscodeApi.postMessage({ type: 'webview.backfillKeywords', mode: 'all' });
+	});
+
+	cancelBackfillButton.addEventListener('click', () => {
+		cancelBackfillButton.disabled = true;
+		vscodeApi.postMessage({ type: 'webview.cancelBackfill' });
+	});
+
+	exportDatasetButton.addEventListener('click', () => {
+		exportDatasetButton.disabled = true;
+		exportResults.innerHTML = '<p class="info">Exporting dataset...</p>';
+		vscodeApi.postMessage({ type: 'webview.exportDataset' });
+	});
+
+	downloadDatasetButton.addEventListener('click', () => {
+		downloadDatasetButton.disabled = true;
+		downloadResults.innerHTML = '<p class="info">Preparing download...</p>';
+		vscodeApi.postMessage({ type: 'webview.downloadDataset' });
+	});
+
+	lastExport.addEventListener('click', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const button = event.target.closest('button[data-action]');
+		if (!button) {
+			return;
+		}
+		const action = button.getAttribute('data-action');
+		const path = button.getAttribute('data-path');
+		if (action === 'openDataset' && path) {
+			vscodeApi.postMessage({ type: 'webview.openFolder', path });
+		} else if (action === 'openManifest' && path) {
+			vscodeApi.postMessage({ type: 'webview.openFile', path });
+		}
+	});
+
+	downloadResults.addEventListener('click', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const button = event.target.closest('button[data-action]');
+		if (!button) {
+			return;
+		}
+		const action = button.getAttribute('data-action');
+		const path = button.getAttribute('data-path');
+		if (action === 'openFile' && path) {
+			vscodeApi.postMessage({ type: 'webview.openFile', path });
+		}
 	});
 
 	backfillPanel.addEventListener('click', event => {
@@ -567,7 +710,7 @@
 
 		const nextStateFilter = filters.state || 'open';
 		issueStateFilter = nextStateFilter;
-		if (currentTab !== 'unlinked') {
+		if (currentTab !== 'unlinked' && currentTab !== 'mlTraining') {
 			currentTab = nextStateFilter;
 		}
 		updateStateTabs();
@@ -595,7 +738,7 @@
 		renderReadinessFilter(filters.readiness);
 		renderOverviewMetrics(dashboardMetrics);
 
-		const showIssues = currentTab !== 'unlinked';
+		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining';
 
 		if (loadingState) {
 			loadingState.hidden = !showIssues || !loading;
@@ -608,6 +751,7 @@
 
 		overviewMetrics.hidden = !showIssues;
 		issueList.hidden = !showIssues;
+		issuesPanel.hidden = !showIssues;
 
 		if (showIssues) {
 			if (!loading && issues.length === 0) {
@@ -672,6 +816,7 @@
 
 		refreshRunAnalysisControls();
 		renderBackfillPanel(state);
+		renderMLTrainingPanel();
 		enforceSelection();
 		renderRiskDisplay(selectedIssueNumber);
 	}
@@ -849,7 +994,25 @@
 			}
 			metricsItems.push(String(summary.metrics.filesTouched ?? 0) + ' files touched');
 			metricsItems.push(String(summary.metrics.changeVolume ?? 0) + ' lines changed');
-			metricsItems.push(String(summary.metrics.reviewCommentCount ?? 0) + ' review friction signals');
+			const reviewSignals = typeof summary.metrics.reviewCommentCount === 'number' ? summary.metrics.reviewCommentCount : 0;
+			const reviewBreakdown = [];
+			const prReviewComments = typeof summary.metrics.prReviewCommentCount === 'number' ? summary.metrics.prReviewCommentCount : 0;
+			const prDiscussionComments = typeof summary.metrics.prDiscussionCommentCount === 'number' ? summary.metrics.prDiscussionCommentCount : 0;
+			const prChangeRequests = typeof summary.metrics.prChangeRequestCount === 'number' ? summary.metrics.prChangeRequestCount : 0;
+			if (prReviewComments > 0) {
+				reviewBreakdown.push(prReviewComments + ' review comment' + (prReviewComments === 1 ? '' : 's'));
+			}
+			if (prDiscussionComments > 0) {
+				reviewBreakdown.push(prDiscussionComments + ' discussion comment' + (prDiscussionComments === 1 ? '' : 's'));
+			}
+			if (prChangeRequests > 0) {
+				reviewBreakdown.push(prChangeRequests + ' change request' + (prChangeRequests === 1 ? '' : 's'));
+			}
+			let reviewLabel = reviewSignals + ' review friction signals';
+			if (reviewBreakdown.length) {
+				reviewLabel += ' (' + reviewBreakdown.join(', ') + ')';
+			}
+			metricsItems.push(reviewLabel);
 		}
 		const metricsHtml = metricsItems.length
 			? '<ul class="risk-metrics">' + metricsItems.map(/** @param {any} item */ item => '<li>' + escapeHtml(item) + '</li>').join('') + '</ul>'
@@ -1026,6 +1189,31 @@
 			'</li>';
 		}).join('');
 		return '<ul class="backfill-list">' + items + '</ul>';
+	}
+
+	/**
+	 * Render ML Training panel visibility
+	 */
+	function renderMLTrainingPanel() {
+		const showPanel = currentTab === 'mlTraining';
+		mlTrainingPanel.hidden = !showPanel;
+		mlTrainingPanel.style.display = showPanel ? 'block' : 'none';
+		mainContainer.style.display = showPanel ? 'none' : 'grid';
+		if (showPanel) {
+			loadKeywordStats();
+			loadLastExport();
+		}
+	}
+
+	/**
+	 * Load keyword coverage statistics
+	 */
+	function loadKeywordStats() {
+		vscodeApi.postMessage({ type: 'webview.getKeywordStats' });
+	}
+
+	function loadLastExport() {
+		vscodeApi.postMessage({ type: 'webview.getLastExport' });
 	}
 
 	/**
@@ -1288,6 +1476,8 @@
 			'</div>',
 			'<div class="assessment-actions">'
 		];
+			lines.push('<button class="button-link" type="button" data-action="copyForAI">📋 Copy for AI</button>');
+			lines.push('<button class="button-link" type="button" data-action="sendToAI">🤖 Send to AI Assistant</button>');
 			lines.push('<button class="button-link" type="button" data-action="exportMarkdown">Export Markdown</button>');
 			lines.push('<button class="button-link" type="button" data-action="exportJson">Export JSON</button>');
 		if (issueUrl) {
@@ -1356,6 +1546,283 @@
 			'</li>';
 		}).join('');
 		container.innerHTML = '<div class="assessment-history"><h4>Assessment History</h4><ol class="history-timeline" role="list">' + items + '</ol></div>';
+	}
+
+	/**
+	 * Update keyword coverage statistics
+	 * @param {{ totalIssues: number, withKeywords: number, coverage: number }} stats
+	 */
+	function updateKeywordStats(stats) {
+		totalIssuesCount.textContent = String(stats.totalIssues);
+		keywordCoverageCount.textContent = String(stats.withKeywords);
+		keywordCoveragePct.textContent = stats.coverage.toFixed(1) + '%';
+	}
+
+	/**
+	 * Update backfill progress bar
+	 * @param {{ completed: number, total: number, current?: string, status?: string, successCount?: number, failureCount?: number, skippedCount?: number, tokensUsed?: number, mode?: 'missing' | 'all' }} progress
+	 */
+	function updateBackfillProgress(progress) {
+		const total = Number(progress.total) || 0;
+		const completed = Number(progress.completed) || 0;
+		const pct = total > 0 ? (completed / total) * 100 : 0;
+		backfillProgress.hidden = false;
+		backfillProgressBar.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + '%';
+		const status = typeof progress.status === 'string' ? progress.status : 'running';
+		const segments = [];
+		if (status === 'completed') {
+			segments.push('Completed');
+		} else if (status === 'cancelled') {
+			segments.push('Cancelling...');
+		} else {
+			segments.push('Processing...');
+		}
+		if (progress.mode === 'all') {
+			segments.push('Refreshing all issues');
+		} else if (progress.mode === 'missing') {
+			segments.push('Filling gaps');
+		}
+		if (progress.current) {
+			segments.push(`Processing ${progress.current}`);
+		}
+		if (total > 0) {
+			segments.push(`${completed}/${total} issues`);
+		} else {
+			segments.push(`${completed} issues`);
+		}
+		const successes = Number(progress.successCount) || 0;
+		const failures = Number(progress.failureCount) || 0;
+		const skipped = Number(progress.skippedCount) || 0;
+		segments.push(`${successes} succeeded`);
+		if (failures > 0) {
+			segments.push(`${failures} failed`);
+		}
+		if (skipped > 0) {
+			segments.push(`${skipped} skipped`);
+		}
+		const tokens = Number(progress.tokensUsed) || 0;
+		if (tokens > 0) {
+			segments.push(`${tokens} tokens`);
+		}
+		backfillStatus.textContent = segments.join(' • ');
+		cancelBackfillButton.disabled = status !== 'running';
+	}
+
+	/**
+	 * Convert a millisecond duration to a human-readable label
+	 * @param {number | undefined} durationMs
+	 * @returns {string | undefined}
+	 */
+	function formatDurationMs(durationMs) {
+		if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) {
+			return undefined;
+		}
+		if (durationMs < 1000) {
+			return `${Math.round(durationMs)} ms`;
+		}
+		const totalSeconds = Math.floor(durationMs / 1000);
+		const minutes = Math.floor(totalSeconds / 60);
+		const seconds = totalSeconds % 60;
+		const remainingMs = Math.round(durationMs % 1000);
+		if (minutes > 0) {
+			const secondsPart = seconds > 0 ? `${seconds}s` : '';
+			return `${minutes}m${secondsPart ? ' ' + secondsPart : ''}`;
+		}
+		if (remainingMs > 0) {
+			return `${seconds}s ${remainingMs}ms`;
+		}
+		return `${seconds}s`;
+	}
+
+	/**
+	 * Handle backfill completion
+	 * @param {any} message
+	 */
+	function handleBackfillComplete(message) {
+		setBackfillButtonsDisabled(false);
+		cancelBackfillButton.disabled = true;
+		backfillProgress.hidden = true;
+		const result = message?.result ?? {};
+		const mode = result.mode === 'all' ? 'all' : (result.mode === 'missing' ? 'missing' : undefined);
+		const processed = Number(result.processedIssues) || 0;
+		const successCount = Number(result.successCount) || 0;
+		const failureCount = Number(result.failureCount) || 0;
+		const skippedCount = Number(result.skippedCount) || 0;
+		const tokensUsed = Number(result.tokensUsed) || 0;
+		let durationMs = typeof message?.durationMs === 'number' ? message.durationMs : undefined;
+		if (durationMs === undefined && typeof result.startedAt === 'string' && typeof result.completedAt === 'string') {
+			const started = Date.parse(result.startedAt);
+			const completed = Date.parse(result.completedAt);
+			if (Number.isFinite(started) && Number.isFinite(completed) && completed >= started) {
+				durationMs = completed - started;
+			}
+		}
+		const durationLabel = formatDurationMs(durationMs);
+		if (message.success) {
+			const countsLine = `Success: ${successCount}, Failed: ${failureCount}, Skipped: ${skippedCount}`;
+			const modeLine = mode === 'all'
+				? '<p>Mode: refreshed all stored issues.</p>'
+				: (mode === 'missing' ? '<p>Mode: filled missing keywords only.</p>' : '');
+			backfillResults.innerHTML =
+				'<div class="success-message">' +
+				'<p><strong>Backfill Complete</strong></p>' +
+				'<p>Processed: ' + processed + ' issues</p>' +
+				'<p>' + countsLine + '</p>' +
+				'<p>Tokens used: ' + tokensUsed + '</p>' +
+				(durationLabel ? '<p>Duration: ' + durationLabel + '</p>' : '') +
+				modeLine +
+				'</div>';
+			loadKeywordStats();
+			return;
+		}
+
+		const status = typeof result.status === 'string' ? result.status : undefined;
+		if (status === 'cancelled') {
+			backfillResults.innerHTML =
+				'<p class="info">Backfill cancelled after processing ' + processed + ' issues.</p>';
+			return;
+		}
+		if (!status && typeof message?.error === 'string' && /cancel/i.test(message.error)) {
+			backfillResults.innerHTML = '<p class="info">' + escapeHtml(message.error) + '</p>';
+			return;
+		}
+
+		const fallbackError = Array.isArray(result.errors) && result.errors.length
+			? result.errors[0]?.message
+			: undefined;
+		const errorMessage = message?.error || fallbackError || 'Unknown error';
+		backfillResults.innerHTML =
+			'<div class="error-message">' +
+			'<p><strong>Backfill Failed</strong></p>' +
+			'<p>' + escapeHtml(errorMessage) + '</p>' +
+			'</div>';
+	}
+
+		/**
+		 * Render last export summary
+		 * @param {{ success?: boolean; manifest?: any; manifestPath?: string; datasetPath?: string; storedAt?: string } | undefined} record
+		 */
+		function renderLastExport(record) {
+			if (!record || !record.success || typeof record.manifest !== 'object' || record.manifest === null) {
+				lastExport.innerHTML = '<p class="muted">No exports yet</p>';
+				return;
+			}
+			const manifest = record.manifest || {};
+			const snapshots = Number(manifest.snapshotsExported) || 0;
+			const coverage = typeof manifest.keywordCoveragePct === 'number'
+				? manifest.keywordCoveragePct.toFixed(1)
+				: '0.0';
+			const rawWarnings = Array.isArray(manifest.validationReport?.warnings)
+				? manifest.validationReport.warnings
+				: [];
+			const warnings = /** @type {string[]} */ (rawWarnings.filter(
+				/** @type {(warning: string) => boolean} */ (warning => typeof warning === 'string' && warning.length > 0)
+			));
+			const completedAtIso = typeof manifest.exportCompletedAt === 'string' && manifest.exportCompletedAt
+				? manifest.exportCompletedAt
+				: (typeof record.storedAt === 'string' ? record.storedAt : undefined);
+			const completedAtLabel = completedAtIso ? new Date(completedAtIso).toLocaleString() : undefined;
+			const datasetPath = typeof record.datasetPath === 'string' ? record.datasetPath : '';
+			const manifestPath = typeof record.manifestPath === 'string' ? record.manifestPath : '';
+			const warningHtml = warnings.length
+				? '<p>Warnings:</p><ul>' + warnings.map(warning => '<li>' + escapeHtml(warning) + '</li>').join('') + '</ul>'
+				: '';
+			const buttons = [
+				datasetPath ? '<button class="compact-button" data-action="openDataset" data-path="' + escapeHtml(datasetPath) + '">Open Dataset Folder</button>' : '',
+				manifestPath ? '<button class="compact-button" data-action="openManifest" data-path="' + escapeHtml(manifestPath) + '">View Manifest</button>' : ''
+			].filter(Boolean);
+			const actionsRow = buttons.length
+				? '<div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">' + buttons.join('') + '</div>'
+				: '';
+			lastExport.innerHTML =
+				(completedAtLabel ? '<p><strong>Last Export:</strong> ' + escapeHtml(completedAtLabel) + '</p>' : '<p><strong>Last Export:</strong> Complete</p>') +
+				'<p>Snapshots: ' + snapshots + '</p>' +
+				'<p>Coverage: ' + coverage + '%</p>' +
+				warningHtml +
+				actionsRow;
+		}
+
+	/**
+	 * Handle export completion
+	 * @param {any} message
+	 */
+	function handleExportComplete(message) {
+		console.log('[IssueTriage] exportComplete message', message);
+		exportDatasetButton.disabled = false;
+		if (message.success) {
+			const manifest = message.manifest || {};
+			const snapshots = Number(manifest.snapshotsExported) || 0;
+			const coverage = typeof manifest.keywordCoveragePct === 'number'
+				? manifest.keywordCoveragePct.toFixed(1)
+				: '0.0';
+			const rawWarnings = Array.isArray(manifest.validationReport?.warnings)
+				? manifest.validationReport.warnings
+				: [];
+			const warnings = /** @type {string[]} */ (rawWarnings.filter(
+				/** @type {(warning: string) => boolean} */ (warning => typeof warning === 'string' && warning.length > 0)
+			));
+			exportResults.innerHTML =
+				'<div class="success-message">' +
+				'<p><strong>Export Complete</strong></p>' +
+				'<p>Snapshots: ' + snapshots + '</p>' +
+				'<p>Coverage: ' + coverage + '%</p>' +
+				(warnings.length ? '<p>Warnings:</p><ul>' + warnings.map(
+					/** @type {(warning: string) => string} */ (warning => '<li>' + escapeHtml(warning) + '</li>')
+				).join('') + '</ul>' : '') +
+				'</div>';
+			const exportRecord = {
+				success: true,
+				manifest,
+				manifestPath: typeof message.manifestPath === 'string' ? message.manifestPath : '',
+				datasetPath: typeof message.datasetPath === 'string' ? message.datasetPath : '',
+				storedAt: new Date().toISOString()
+			};
+			renderLastExport(exportRecord);
+			loadKeywordStats();
+		} else {
+			exportResults.innerHTML = 
+				'<div class="error-message">' +
+				'<p><strong>Export Failed</strong></p>' +
+				'<p>' + escapeHtml(message.error || 'Unknown error') + '</p>' +
+				'</div>';
+		}
+	}
+
+	/**
+	 * Handle dataset download completion
+	 * @param {any} message
+	 */
+	function handleDownloadComplete(message) {
+		console.log('[IssueTriage] downloadComplete message', message);
+		downloadDatasetButton.disabled = false;
+		if (message.cancelled) {
+			downloadResults.innerHTML = '<p class="muted">Download cancelled.</p>';
+			return;
+		}
+		if (message.success) {
+			const count = Number(message.count) || 0;
+			const coverage = typeof message.coverage === 'number'
+				? message.coverage.toFixed(1)
+				: '0.0';
+			const filePath = typeof message.filePath === 'string' ? message.filePath : '';
+			const pathHtml = filePath ? escapeHtml(filePath) : '';
+			const buttons = filePath
+				? '<div style="margin-top: 8px;"><button class="compact-button" data-action="openFile" data-path="' + pathHtml + '">Open File</button></div>'
+				: '';
+			downloadResults.innerHTML =
+				'<div class="success-message">' +
+				'<p><strong>Download Ready</strong></p>' +
+				'<p>Saved ' + count + ' profiles (' + coverage + '% coverage)</p>' +
+				(filePath ? '<p class="muted">' + pathHtml + '</p>' : '') +
+				buttons +
+				'</div>';
+		} else {
+			downloadResults.innerHTML =
+				'<div class="error-message">' +
+				'<p><strong>Download Failed</strong></p>' +
+				'<p>' + escapeHtml(message.error || 'Unknown error') + '</p>' +
+				'</div>';
+		}
 	}
 
 	vscodeApi.postMessage({ type: 'webview.ready' });

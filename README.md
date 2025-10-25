@@ -91,6 +91,47 @@ IssueTriage uses OpenRouter to power AI-driven assessments.
 - Run **Issue Triage: Sign Out** to revoke local tokens (secrets are stored via VS Code SecretStorage).
 - Re-run **Connect GitHub** any time you rotate OAuth credentials or need to change accounts.
 
+### 8. Machine Learning Training (MVP)
+
+IssueTriage includes an MVP implementation of historical risk learning using keyword-based similarity search. Access the **ML Training** tab in the Issue Triage panel to manage keyword extraction and dataset export.
+
+#### Keyword Extraction
+- When risk analysis runs on closed issues, IssueTriage automatically extracts 5-8 keywords representing:
+  - Components/subsystems (e.g., "authentication", "database", "ui")
+  - Change types (e.g., "refactor", "bugfix", "feature", "migration")
+  - Risk signals (e.g., "breaking-change", "security", "performance")
+- Keywords are stored in the local SQLite database and indexed using FTS5 for fast searching.
+
+#### Using the ML Training Tab
+1. Open the Issue Triage panel and click the **ML Training** tab.
+2. View real-time **Keyword Coverage** statistics showing:
+   - Total closed issues in the selected repository
+   - Issues with extracted keywords
+   - Coverage percentage (target: 95%+)
+3. Click **Backfill Keywords** to extract keywords for closed issues that don't have them yet:
+   - Progress bar shows current issue and completion percentage
+   - Token usage is monitored (200k token daily budget by default)
+   - Click **Cancel** to stop the process (resumes from checkpoint)
+4. Click **Export Training Dataset** to validate and prepare the dataset for ML training:
+   - Validates keyword coverage meets minimum threshold (95%)
+   - Verifies sufficient historical data
+   - Generates manifest with export metadata
+5. View **Last Export** information including timestamp and record counts.
+
+#### Command Palette Alternative
+- **Issue Triage: Backfill Keywords** - Start keyword extraction from command palette
+- **Issue Triage: Export Training Dataset** - Export dataset from command palette
+
+#### Similarity Search
+- Keywords enable fast similarity matching using:
+  - FTS5 full-text search for initial candidate retrieval
+  - Jaccard similarity re-ranking for precision
+  - Shared keywords and labels boost relevance
+- Similarity results show keyword overlap percentage and shared risk signals.
+
+#### Future Enhancements
+See `plans/feature-risk-learning-semantic.md` for planned semantic search with embeddings and hybrid retrieval.
+
 ## Requirements
 
 - Visual Studio Code 1.105.0 or later.

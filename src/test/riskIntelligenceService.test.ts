@@ -5,6 +5,20 @@ import type { IssueRiskSnapshot, PullRequestRiskData, CommitRiskData, IssueSumma
 import type { RiskProfile } from '../types/risk';
 
 type SettingsRecord = Record<string, unknown>;
+type IssueDetail = {
+	number: number;
+	title: string;
+	body: string;
+	url: string;
+	repository: string;
+	author: string;
+	labels: string[];
+	assignees: string[];
+	milestone?: string;
+	updatedAt: string;
+	createdAt?: string;
+	state: 'open' | 'closed';
+};
 
 class MemoryRiskStore implements RiskProfileStore {
 	private readonly store = new Map<string, RiskProfile>();
@@ -31,6 +45,22 @@ class MemoryRiskStore implements RiskProfileStore {
 			.filter((profile): profile is RiskProfile => Boolean(profile));
 	}
 
+	public async searchByKeywords(repository: string, keywords: string[], limit = 10): Promise<RiskProfile[]> {
+		return [];
+	}
+
+	public async getClosedIssuesWithoutKeywords(repository: string, limit = 100): Promise<RiskProfile[]> {
+		return [];
+	}
+
+	public async getKeywordCoverage(repository: string): Promise<{ total: number; withKeywords: number; coverage: number }> {
+		return { total: 0, withKeywords: 0, coverage: 0 };
+	}
+
+	public async getAllProfiles(repository: string): Promise<RiskProfile[]> {
+		return Array.from(this.store.values()).filter(profile => profile.repository === repository);
+	}
+
 	private key(repository: string, issueNumber: number): string {
 		return `${repository}#${issueNumber}`;
 	}
@@ -51,7 +81,12 @@ class StubTelemetry {
 }
 
 class FakeGitHubClient {
-	constructor(private readonly snapshots: Map<string, IssueRiskSnapshot>) {}
+	constructor(
+		private readonly snapshots: Map<string, IssueRiskSnapshot>,
+		private readonly issues: Map<string, IssueDetail>,
+		private readonly pullRequestDetails: Map<string, { files: Array<{ path: string; additions?: number; deletions?: number }> }> = new Map(),
+		private readonly commitDetails: Map<string, { files: Array<{ path: string; additions?: number; deletions?: number }> }> = new Map()
+	) {}
 
 	public async getIssueRiskSnapshot(repository: string, issueNumber: number): Promise<IssueRiskSnapshot> {
 		const key = `${repository}#${issueNumber}`;
@@ -60,6 +95,42 @@ class FakeGitHubClient {
 			throw new Error('snapshot not found');
 		}
 		return snapshot;
+	}
+
+	public async getIssueDetails(repository: string, issueNumber: number) {
+		const key = `${repository}#${issueNumber}`;
+		const detail = this.issues.get(key);
+		if (!detail) {
+			throw new Error('issue detail not found');
+		}
+		return detail;
+	}
+
+	public async getPullRequestBackfillDetail(repository: string, pullNumber: number) {
+		const key = `${repository}#${pullNumber}`;
+		return this.pullRequestDetails.get(key) ?? { files: [] };
+	}
+
+	public async getCommitBackfillDetail(repository: string, sha: string) {
+		const key = `${repository}#${sha}`;
+		return this.commitDetails.get(key) ?? { files: [] };
+	}
+
+	public static buildIssueDetail(issue: IssueSummary & { body?: string; author?: string }): IssueDetail {
+		return {
+			number: issue.number,
+			title: issue.title,
+			body: issue.body ?? '',
+			url: issue.url,
+			repository: 'owner/repo',
+			author: issue.author ?? 'octocat',
+			labels: issue.labels,
+			assignees: issue.assignees,
+			milestone: issue.milestone,
+			updatedAt: issue.updatedAt,
+			createdAt: issue.updatedAt,
+			state: issue.state
+		};
 	}
 }
 
@@ -105,11 +176,6 @@ suite('RiskIntelligenceService', () => {
 			pullRequests,
 			commits: []
 		};
-		const github = new FakeGitHubClient(new Map([[ 'owner/repo#42', snapshot ]]));
-		const settings = new StubSettings({ 'risk.lookbackDays': 180 });
-		const telemetry = new StubTelemetry();
-		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
-
 		const issues: IssueSummary[] = [
 			{
 				number: 42,
@@ -122,6 +188,19 @@ suite('RiskIntelligenceService', () => {
 				state: 'open'
 			}
 		];
+		const issueDetail = FakeGitHubClient.buildIssueDetail({ ...issues[0], body: 'Complex issue body describing regression risk.' });
+		const prDetails = new Map([
+			['owner/repo#10', { files: [{ path: 'src/auth/service.ts', additions: 500, deletions: 120 }] }],
+			['owner/repo#11', { files: [{ path: 'src/auth/fix.ts', additions: 80, deletions: 20 }] }]
+		]);
+		const github = new FakeGitHubClient(
+			new Map([[ 'owner/repo#42', snapshot ]]),
+			new Map([[ 'owner/repo#42', issueDetail ]]),
+			prDetails
+		);
+		const settings = new StubSettings({ 'risk.lookbackDays': 180 });
+		const telemetry = new StubTelemetry();
+		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
 
 		const initialSummaries = await service.primeIssues('owner/repo', issues);
 		const primeSummary = initialSummaries.get(42);
@@ -137,6 +216,9 @@ suite('RiskIntelligenceService', () => {
 		assert.ok(summary?.metrics);
 		assert.strictEqual(summary?.metrics?.prCount, 2);
 		assert.strictEqual(summary?.metrics?.directCommitCount, 0);
+		assert.strictEqual(summary?.metrics?.prReviewCommentCount, 18);
+		assert.strictEqual(summary?.metrics?.prDiscussionCommentCount, 4);
+		assert.strictEqual(summary?.metrics?.prChangeRequestCount, 2);
 
 		const profile = await service.getProfile('owner/repo', 42);
 		assert.ok(profile);
@@ -144,6 +226,10 @@ suite('RiskIntelligenceService', () => {
 		assert.strictEqual(profile?.metrics.directCommitCount, 0);
 		assert.strictEqual(profile?.metrics.changeVolume, 1200);
 		assert.strictEqual(profile?.metrics.directCommitChangeVolume, 0);
+		assert.strictEqual(profile?.metrics.reviewCommentCount, 26);
+		assert.strictEqual(profile?.metrics.prReviewCommentCount, 18);
+		assert.strictEqual(profile?.metrics.prDiscussionCommentCount, 4);
+		assert.strictEqual(profile?.metrics.prChangeRequestCount, 2);
 	});
 
 	test('uses direct commits when no pull requests are linked', async () => {
@@ -166,11 +252,6 @@ suite('RiskIntelligenceService', () => {
 			pullRequests: [],
 			commits
 		};
-		const github = new FakeGitHubClient(new Map([[ 'owner/repo#77', snapshot ]]));
-		const settings = new StubSettings({ 'risk.lookbackDays': 90 });
-		const telemetry = new StubTelemetry();
-		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
-
 		const issues: IssueSummary[] = [
 			{
 				number: 77,
@@ -183,6 +264,19 @@ suite('RiskIntelligenceService', () => {
 				state: 'open'
 			}
 		];
+		const issueDetail = FakeGitHubClient.buildIssueDetail({ ...issues[0], body: 'Legacy backfill body', author: 'maintainer' });
+		const commitDetails = new Map([
+			['owner/repo#abc123def456', { files: [{ path: 'server/core.ts', additions: 600, deletions: 150 }] }]
+		]);
+		const github = new FakeGitHubClient(
+			new Map([[ 'owner/repo#77', snapshot ]]),
+			new Map([[ 'owner/repo#77', issueDetail ]]),
+			new Map(),
+			commitDetails
+		);
+		const settings = new StubSettings({ 'risk.lookbackDays': 90 });
+		const telemetry = new StubTelemetry();
+		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
 
 		await service.primeIssues('owner/repo', issues);
 		await service.waitForIdle();
@@ -194,17 +288,23 @@ suite('RiskIntelligenceService', () => {
 		assert.strictEqual(summary?.metrics?.prCount, 0);
 		assert.strictEqual(summary?.metrics?.directCommitCount, 1);
 		assert.strictEqual(summary?.riskLevel, 'medium');
+		assert.strictEqual(summary?.metrics?.prReviewCommentCount, 0);
+		assert.strictEqual(summary?.metrics?.prDiscussionCommentCount, 0);
+		assert.strictEqual(summary?.metrics?.prChangeRequestCount, 0);
 
 		const profile = await service.getProfile('owner/repo', 77);
 		assert.ok(profile);
 		assert.strictEqual(profile?.metrics.directCommitCount, 1);
 		assert.strictEqual(profile?.metrics.changeVolume, 750);
 		assert.strictEqual(profile?.metrics.directCommitChangeVolume, 750);
+		assert.strictEqual(profile?.metrics.prReviewCommentCount, 0);
+		assert.strictEqual(profile?.metrics.prDiscussionCommentCount, 0);
+		assert.strictEqual(profile?.metrics.prChangeRequestCount, 0);
 	});
 
 	test('skips issues outside lookback window', async () => {
 		const store = new MemoryRiskStore();
-		const github = new FakeGitHubClient(new Map());
+		const github = new FakeGitHubClient(new Map(), new Map());
 		const settings = new StubSettings({ 'risk.lookbackDays': 30 });
 		const telemetry = new StubTelemetry();
 		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);

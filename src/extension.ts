@@ -1,8 +1,7 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import { existsSync, promises as fs } from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { config as loadEnv } from 'dotenv';
 import { CredentialService } from './services/credentialService';
 import { SettingsService } from './services/settingsService';
@@ -17,24 +16,33 @@ import { AssessmentService, AssessmentError } from './services/assessmentService
 import { CliToolService } from './services/cliToolService';
 import { RiskStorage } from './services/riskStorage';
 import { RiskIntelligenceService } from './services/riskIntelligenceService';
+import { AIIntegrationService } from './services/aiIntegrationService';
+import { KeywordExtractionService } from './services/keywordExtractionService';
+import { KeywordBackfillService } from './services/keywordBackfillService';
+import { HistoricalDataService } from './services/historicalDataService';
+import type { ExportResult } from './services/historicalDataService';
+import { SimilarityService } from './services/similarityService';
 import type { AssessmentRecord } from './services/assessmentStorage';
-import type { RiskSummary } from './types/risk';
+import type { BackfillProgress, RiskSummary, ExportManifest } from './types/risk';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
-	console.log('IssueTriage extension activated.');
+	const activationStart = Date.now();
+	console.log('[IssueTriage] Extension activation started');
 
 	try {
 		const envPath = path.join(context.extensionUri.fsPath, '.env');
 		if (existsSync(envPath)) {
 			loadEnv({ path: envPath });
-			console.log('IssueTriage environment variables loaded from .env file.');
+			console.log('[IssueTriage] Environment variables loaded from .env file');
 		}
 	} catch (error) {
-		console.warn('IssueTriage could not load .env file.', error);
+		console.warn('[IssueTriage] Could not load .env file', error);
 	}
 
+	console.log('[IssueTriage] Creating settings service...');
 	const settings = new SettingsService();
+	console.log('[IssueTriage] Creating state service...');
 	const state = new StateService(context.globalState, context.workspaceState);
 	const services: ServiceBundle = {
 		credentials: new CredentialService(context.secrets),
@@ -47,6 +55,8 @@ export function activate(context: vscode.ExtensionContext) {
 		assessment: undefined!,
 		cliTools: undefined!,
 		risk: undefined!,
+		historicalData: undefined!,
+		aiIntegration: new AIIntegrationService(),
 		extensionUri: context.extensionUri
 	};
 
@@ -57,13 +67,33 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push(secretSubscription);
 
+	console.log('[IssueTriage] Creating auth service...');
 	const auth = new GitHubAuthService(services.credentials, services.settings, services.state, services.telemetry);
+	console.log('[IssueTriage] Creating GitHub client...');
 	const github = new GitHubClient(auth, services.settings, services.telemetry);
+	console.log('[IssueTriage] Creating CLI tools service...');
 	const cliTools = new CliToolService(context.extensionUri.fsPath, services.settings, services.state, services.telemetry);
+	console.log('[IssueTriage] Creating assessment storage (SQLite)...');
+	const storageStart = Date.now();
 	const assessmentStorage = new AssessmentStorage(context.globalStorageUri.fsPath);
+	console.log(`[IssueTriage] Assessment storage created in ${Date.now() - storageStart}ms`);
+	console.log('[IssueTriage] Creating risk storage (SQLite)...');
+	const riskStorageStart = Date.now();
 	const riskStorage = new RiskStorage(context.globalStorageUri.fsPath);
-	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry);
+	console.log(`[IssueTriage] Risk storage created in ${Date.now() - riskStorageStart}ms`);
+	
+	// ML Learning services
+	console.log('[IssueTriage] Creating ML services...');
+	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry);
+	const similarity = new SimilarityService(riskStorage);
+	const keywordBackfill = new KeywordBackfillService(riskStorage, github, keywordExtractor, services.telemetry);
+	const historicalData = new HistoricalDataService(riskStorage, context.globalStorageUri.fsPath, services.telemetry);
+	
+	console.log('[IssueTriage] Creating risk intelligence service...');
+	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry, keywordExtractor);
+	console.log('[IssueTriage] Creating assessment service...');
 	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk);
+	console.log('[IssueTriage] Creating issue manager...');
 	const issueManager = new IssueManager(auth, github, services.settings, services.state, services.telemetry, risk, assessment);
 	services.auth = auth;
 	services.github = github;
@@ -71,14 +101,24 @@ export function activate(context: vscode.ExtensionContext) {
 	services.assessment = assessment;
 	services.cliTools = cliTools;
 	services.risk = risk;
+services.historicalData = historicalData;
 	context.subscriptions.push(issueManager);
 	context.subscriptions.push(new vscode.Disposable(() => assessment.dispose()));
 	context.subscriptions.push(cliTools);
 	context.subscriptions.push(risk);
+	context.subscriptions.push(keywordBackfill);
+	
+	console.log('[IssueTriage] Initializing issue manager...');
+	const initStart = Date.now();
 	void issueManager.initialize().catch(error => {
 		const message = error instanceof Error ? error.message : String(error);
 		services.telemetry.trackEvent('issueManager.initializeFailed', { message });
+		console.error('[IssueTriage] Issue manager initialization failed:', error);
+	}).finally(() => {
+		console.log(`[IssueTriage] Issue manager initialized in ${Date.now() - initStart}ms`);
 	});
+	
+	console.log(`[IssueTriage] Extension activation completed in ${Date.now() - activationStart}ms`);
 
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
 		IssueTriagePanel.createOrShow(services);
@@ -174,11 +214,152 @@ export function activate(context: vscode.ExtensionContext) {
 			void vscode.window.showErrorMessage(`Failed to run ${selection.label}: ${description}`);
 		}
 	});
+	
+	const backfillKeywords = vscode.commands.registerCommand('issuetriage.backfillKeywords', async (mode?: 'missing' | 'all') => {
+		const snapshot = services.issueManager.getSnapshot();
+		const repository = snapshot.selectedRepository;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Select a repository before backfilling keywords.');
+			return;
+		}
+
+		const effectiveMode: 'missing' | 'all' = mode === 'all' ? 'all' : 'missing';
+		const confirmationMessage = effectiveMode === 'all'
+			? `This will regenerate keywords for every closed issue in ${repository.fullName}, even if they already have keywords. This may use significant API tokens. Continue?`
+			: `This will extract keywords for closed issues missing them in ${repository.fullName}. This may use significant API tokens. Continue?`;
+
+		const confirmation = await vscode.window.showWarningMessage(
+			confirmationMessage,
+			{ modal: true },
+			'Yes', 'No'
+		);
+
+		if (confirmation !== 'Yes') {
+			IssueTriagePanel.broadcastBackfillComplete({
+				success: false,
+				error: 'Keyword backfill cancelled.'
+			});
+			return;
+		}
+
+		await vscode.window.withProgress({
+			title: effectiveMode === 'all'
+				? `Refreshing keywords for ${repository.fullName}`
+				: `Backfilling keywords for ${repository.fullName}`,
+			location: vscode.ProgressLocation.Notification,
+			cancellable: true
+		}, async (progress, token) => {
+			token.onCancellationRequested(() => {
+				keywordBackfill.cancel();
+			});
+
+			progress.report({ message: 'Preparing keyword backfill...' });
+
+			const progressDisposable = keywordBackfill.onProgress(p => {
+				progress.report({ message: formatBackfillProgressMessage(p) });
+				IssueTriagePanel.broadcastBackfillProgress(mapBackfillProgressForPanel(p));
+			});
+
+			try {
+				const result = await keywordBackfill.backfillKeywords(repository.fullName, {
+					delayMs: 500,
+					maxTokensPerRun: 200000,
+					mode: effectiveMode,
+					batchSize: effectiveMode === 'missing' ? 50 : undefined
+				});
+
+				const durationMs = calculateBackfillDuration(result);
+				if (result.status === 'completed') {
+					vscode.window.showInformationMessage(
+						`Keyword backfill complete: ${result.successCount} succeeded, ${result.failureCount} failed. Tokens used: ${result.tokensUsed}`
+					);
+				} else if (result.status === 'cancelled') {
+					vscode.window.showWarningMessage('Keyword backfill was cancelled.');
+				} else {
+					const failureMessage = result.errors[0]?.message ?? 'Unknown error';
+					vscode.window.showErrorMessage(`Keyword backfill failed: ${failureMessage}`);
+				}
+
+				IssueTriagePanel.broadcastBackfillComplete({
+					success: result.status === 'completed',
+					result,
+					durationMs,
+					error: result.status === 'completed' ? undefined : result.errors[0]?.message
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				IssueTriagePanel.broadcastBackfillComplete({ success: false, error: message });
+				vscode.window.showErrorMessage(`Keyword backfill failed: ${message}`);
+			} finally {
+				progressDisposable.dispose();
+			}
+		});
+	});
+
+	const trainModel = vscode.commands.registerCommand('issuetriage.trainModel', async () => {
+		const snapshot = services.issueManager.getSnapshot();
+		const repository = snapshot.selectedRepository;
+		if (!repository) {
+			void vscode.window.showWarningMessage('Select a repository before training.');
+			return undefined;
+		}
+
+		return vscode.window.withProgress({
+			title: `Exporting dataset for ${repository.fullName}`,
+			location: vscode.ProgressLocation.Notification
+		}, async (progress): Promise<ExportResult> => {
+			progress.report({ message: 'Validating dataset...' });
+
+			try {
+				const result = await historicalData.exportDataset({
+					repository: repository.fullName,
+					minKeywordCoverage: 0.95
+				});
+
+				console.log('[IssueTriage] Export dataset completed', {
+					success: result.success,
+					snapshots: result.manifest.snapshotsExported,
+					coverage: result.manifest.keywordCoveragePct
+				});
+
+				await recordLastExport(services.state, repository.fullName, result);
+
+				const validationErrors = result.manifest.validationReport?.errors ?? [];
+
+				if (result.success) {
+					const message = `Dataset export complete! ${result.manifest.snapshotsExported} snapshots with ${result.manifest.keywordCoveragePct.toFixed(1)}% keyword coverage.`;
+					void vscode.window.showInformationMessage(message, 'View Manifest').then(async action => {
+						if (action === 'View Manifest') {
+							try {
+								const doc = await vscode.workspace.openTextDocument(result.manifestPath);
+								await vscode.window.showTextDocument(doc);
+							} catch (error) {
+								const description = error instanceof Error ? error.message : String(error);
+								void vscode.window.showErrorMessage(`Unable to open manifest: ${description}`);
+							}
+						}
+					});
+				} else {
+					const errors = validationErrors.join('\n') || 'Dataset validation failed validation checks.';
+					void vscode.window.showWarningMessage(`Dataset validation warnings:\n${errors}`);
+				}
+
+				// Don't broadcast here - let handleExportDataset do it after command returns
+				return result;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Dataset export failed: ${message}`);
+				// Don't broadcast here - let handleExportDataset catch and broadcast
+				throw error;
+			}
+		});
+	});
+	
 	const signOut = vscode.commands.registerCommand('issuetriage.signOut', async () => {
 		await services.issueManager.signOut();
 	});
 
-	context.subscriptions.push(connectRepository, refreshIssues, assessIssue, runContextTool, signOut);
+	context.subscriptions.push(connectRepository, refreshIssues, assessIssue, runContextTool, backfillKeywords, trainModel, signOut);
 }
 
 // This method is called when your extension is deactivated
@@ -195,7 +376,115 @@ interface ServiceBundle {
 	assessment: AssessmentService;
 	cliTools: CliToolService;
 	risk: RiskIntelligenceService;
+	historicalData: HistoricalDataService;
+	aiIntegration: AIIntegrationService;
 	extensionUri: vscode.Uri;
+}
+
+interface PanelBackfillProgress {
+	completed: number;
+	total: number;
+	current?: string;
+	successCount: number;
+	failureCount: number;
+	skippedCount: number;
+	tokensUsed: number;
+	status: BackfillProgress['status'];
+	mode?: 'missing' | 'all';
+}
+
+interface PanelBackfillCompletePayload {
+	success: boolean;
+	result?: BackfillProgress;
+	durationMs?: number;
+	error?: string;
+}
+
+const LAST_EXPORT_STATE_KEY = 'issuetriage.mlTraining.lastExport';
+
+interface StoredExportRecord {
+	repository: string;
+	success: boolean;
+	manifest: ExportManifest;
+	manifestPath: string;
+	datasetPath: string;
+	storedAt: string;
+}
+
+async function recordLastExport(state: StateService, repository: string, result: ExportResult): Promise<void> {
+	if (!result.success) {
+		return;
+	}
+	try {
+		const existing = {
+			...(state.getWorkspace<Record<string, StoredExportRecord>>(LAST_EXPORT_STATE_KEY, {}) ?? {})
+		};
+		existing[repository] = {
+			repository,
+			success: true,
+			manifest: result.manifest,
+			manifestPath: result.manifestPath,
+			datasetPath: result.datasetPath,
+			storedAt: new Date().toISOString()
+		};
+		await state.updateWorkspace(LAST_EXPORT_STATE_KEY, existing);
+	} catch (error) {
+		console.warn('[IssueTriage] Failed to persist last export record', error);
+	}
+}
+
+function mapBackfillProgressForPanel(progress: BackfillProgress): PanelBackfillProgress {
+	return {
+		completed: progress.processedIssues,
+		total: progress.totalIssues,
+		current: progress.currentIssue ? `#${progress.currentIssue}` : undefined,
+		successCount: progress.successCount,
+		failureCount: progress.failureCount,
+		skippedCount: progress.skippedCount,
+		tokensUsed: progress.tokensUsed,
+		status: progress.status,
+		mode: progress.mode
+	};
+}
+
+function formatBackfillProgressMessage(progress: BackfillProgress): string {
+	const parts: string[] = [];
+	if (progress.status === 'completed') {
+		parts.push('Completed');
+	} else if (progress.status === 'cancelled') {
+		parts.push('Cancelling...');
+	} else {
+		parts.push('Processing...');
+	}
+	if (progress.currentIssue) {
+		parts.push(`Issue #${progress.currentIssue}`);
+	}
+	if (progress.totalIssues > 0) {
+		parts.push(`${progress.processedIssues}/${progress.totalIssues} issues`);
+	} else {
+		parts.push(`${progress.processedIssues} issues`);
+	}
+	parts.push(`${progress.successCount} succeeded`);
+	if (progress.failureCount > 0) {
+		parts.push(`${progress.failureCount} failed`);
+	}
+	if (progress.skippedCount > 0) {
+		parts.push(`${progress.skippedCount} skipped`);
+	}
+	if (progress.tokensUsed > 0) {
+		parts.push(`${progress.tokensUsed} tokens`);
+	}
+	return parts.join(' · ');
+}
+
+function calculateBackfillDuration(progress: BackfillProgress): number | undefined {
+	const started = Date.parse(progress.startedAt);
+	if (!Number.isFinite(started)) {
+		return undefined;
+	}
+	const completedRaw = progress.completedAt ? Date.parse(progress.completedAt) : undefined;
+	const end = typeof completedRaw === 'number' && Number.isFinite(completedRaw) ? completedRaw : Date.now();
+	return Math.max(0, end - started);
 }
 
 class IssueTriagePanel {
@@ -206,9 +495,37 @@ class IssueTriagePanel {
 	private readonly services: ServiceBundle;
 	private disposables: vscode.Disposable[] = [];
 	private readonly stateListener: vscode.Disposable;
+	private lastExportSignature?: string;
 
 	public static broadcastAssessment(record: AssessmentRecord): void {
 		IssueTriagePanel.currentPanel?.postAssessment(record);
+	}
+
+	public static broadcastBackfillProgress(progress: PanelBackfillProgress): void {
+		IssueTriagePanel.currentPanel?.panel.webview.postMessage({
+			type: 'ml.backfillProgress',
+			progress
+		});
+	}
+
+	public static broadcastBackfillComplete(payload: PanelBackfillCompletePayload): void {
+		IssueTriagePanel.currentPanel?.panel.webview.postMessage({
+			type: 'ml.backfillComplete',
+			...payload
+		});
+	}
+
+	public static broadcastExportComplete(payload: {
+		success: boolean;
+		manifest?: any;
+		manifestPath?: string;
+		datasetPath?: string;
+		error?: string;
+	}): void {
+		IssueTriagePanel.currentPanel?.panel.webview.postMessage({
+			type: 'ml.exportComplete',
+			...payload
+		});
 	}
 
 	public static createOrShow(services: ServiceBundle) {
@@ -1211,6 +1528,159 @@ class IssueTriagePanel {
 					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
 					border-radius: 6px;
 				}
+
+				.ml-training-panel {
+					padding: 32px;
+					overflow-y: auto;
+					height: 100%;
+					box-sizing: border-box;
+				}
+
+				.ml-training-content {
+					max-width: 1200px;
+					margin: 0 auto;
+				}
+
+				.ml-training-content h2 {
+					margin-top: 0;
+					margin-bottom: 8px;
+					font-size: 20px;
+				}
+
+				.ml-description {
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					margin-bottom: 24px;
+				}
+
+				.ml-section {
+					margin-bottom: 32px;
+					padding: 20px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-button-background) 4%);
+				}
+
+				.ml-section h3 {
+					margin-top: 0;
+					margin-bottom: 12px;
+					font-size: 16px;
+				}
+
+				.ml-section p {
+					margin: 0 0 16px 0;
+					font-size: 13px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.ml-actions {
+					display: flex;
+					gap: 12px;
+					margin-bottom: 16px;
+				}
+
+				.ml-actions button {
+					padding: 8px 16px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-button-border);
+					background: var(--vscode-button-background);
+					color: var(--vscode-button-foreground);
+					cursor: pointer;
+					font-size: 13px;
+				}
+
+				.ml-actions button:hover {
+					background: var(--vscode-button-hoverBackground);
+				}
+
+				.ml-actions button.primary {
+					font-weight: 600;
+				}
+
+				.ml-actions button:disabled {
+					opacity: 0.5;
+					cursor: not-allowed;
+				}
+
+				.stats-grid {
+					display: grid;
+					grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+					gap: 16px;
+					margin-top: 16px;
+				}
+
+				.stat-card {
+					padding: 16px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.3));
+					border-radius: 6px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-button-background) 8%);
+					text-align: center;
+				}
+
+				.stat-value {
+					font-size: 24px;
+					font-weight: 700;
+					margin-bottom: 4px;
+				}
+
+				.stat-label {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.progress-section {
+					margin-top: 16px;
+				}
+
+				.progress-bar {
+					width: 100%;
+					height: 8px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 85%, var(--vscode-button-background) 15%);
+					border-radius: 4px;
+					overflow: hidden;
+					margin-bottom: 8px;
+				}
+
+				.progress-fill {
+					height: 100%;
+					background: var(--vscode-button-background);
+					transition: width 0.3s ease;
+					width: 0%;
+				}
+
+				.progress-status {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.results-section {
+					margin-top: 16px;
+					font-size: 13px;
+				}
+
+				.success-message {
+					padding: 12px;
+					border-radius: 6px;
+					border: 1px solid var(--vscode-testing-iconPassed, #2ea043);
+					background: color-mix(in srgb, var(--vscode-editor-background) 90%, var(--vscode-testing-iconPassed) 10%);
+					color: var(--vscode-testing-iconPassed, #2ea043);
+				}
+
+				.error-message {
+					padding: 12px;
+					border-radius: 6px;
+					border: 1px solid rgba(229, 83, 75, 0.55);
+					background: color-mix(in srgb, var(--vscode-editor-background) 90%, rgba(229, 83, 75, 0.1));
+					color: rgba(229, 83, 75, 0.95);
+				}
+
+				.info-section {
+					font-size: 13px;
+				}
+
+				.muted {
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					font-style: italic;
+				}
 			</style>`;
 	}
 
@@ -1261,9 +1731,10 @@ class IssueTriagePanel {
 				<button class="state-tab active" id="openTab" aria-pressed="true">Open</button>
 				<button class="state-tab" id="closedTab" aria-pressed="false">Closed</button>
 				<button class="state-tab" id="unlinkedTab" aria-pressed="false">Unlinked</button>
+				<button class="state-tab" id="mlTrainingTab" aria-pressed="false">ML Training</button>
 			</div>
-			<div class="container">
-				<div class="issue-list-panel" aria-label="Issue list and overview">
+			<div class="container" id="mainContainer">
+				<div class="issue-list-panel" aria-label="Issue list and overview" id="issuesPanel">
 					<div id="issueSummary" class="meta-row" role="status" aria-live="polite"></div>
 					<div id="analysisActions" class="analysis-actions" hidden>
 						<button id="runAnalysisButton" class="compact-button" type="button">Run Analysis</button>
@@ -1293,11 +1764,101 @@ class IssueTriagePanel {
 					<h2 class="visually-hidden" id="assessmentHeading">Assessment detail</h2>
 					<section id="assessmentPanel" class="assessment-panel" aria-labelledby="assessmentHeading" aria-live="polite"></section>
 				</div>
+			</div>
+			<div class="ml-training-panel" aria-label="ML Training" id="mlTrainingPanel" hidden>
+				<div class="ml-training-content">
+					<h2>Machine Learning Training</h2>
+					<p class="ml-description">Build and maintain keyword-based similarity search for historical risk learning.</p>
+					
+					<div class="ml-section">
+						<h3>Keyword Coverage</h3>
+						<div id="keywordStats" class="stats-grid">
+							<div class="stat-card">
+								<div class="stat-value" id="totalIssuesCount">-</div>
+								<div class="stat-label">Total Closed Issues</div>
+							</div>
+							<div class="stat-card">
+								<div class="stat-value" id="keywordCoverageCount">-</div>
+								<div class="stat-label">With Keywords</div>
+							</div>
+							<div class="stat-card">
+								<div class="stat-value" id="keywordCoveragePct">-%</div>
+								<div class="stat-label">Coverage</div>
+							</div>
+						</div>
+					</div>
+
+					<div class="ml-section">
+						<h3>Backfill Keywords</h3>
+						<p>Regenerate AI keywords for closed issues. Choose whether to refresh everything or only fill in gaps. This uses LLM API calls and tracks token usage.</p>
+						<div class="ml-actions">
+							<button id="backfillMissingButton" class="primary">Backfill Missing</button>
+							<button id="backfillAllButton" class="compact-button">Backfill All</button>
+							<button id="cancelBackfillButton" disabled>Cancel</button>
+						</div>
+						<p class="muted">Backfill Missing only processes closed issues without keywords. Backfill All regenerates keywords for every closed issue.</p>
+						<div id="backfillProgress" class="progress-section" hidden>
+							<div class="progress-bar">
+								<div id="backfillProgressBar" class="progress-fill"></div>
+							</div>
+							<div id="backfillStatus" class="progress-status"></div>
+						</div>
+						<div id="backfillResults" class="results-section"></div>
+					</div>
+
+					<div class="ml-section">
+						<h3>Export Training Dataset</h3>
+						<p>Validate keyword coverage and export the dataset for external model training.</p>
+						<div class="ml-actions">
+							<button id="exportDatasetButton" class="primary">Export Dataset</button>
+							<button id="downloadDatasetButton" class="compact-button">Download JSON</button>
+						</div>
+						<div id="exportResults" class="results-section"></div>
+						<div id="downloadResults" class="results-section"></div>
+					</div>
+
+					<div class="ml-section">
+						<h3>Last Export</h3>
+						<div id="lastExport" class="info-section">
+							<p class="muted">No exports yet</p>
+						</div>
+					</div>
+				</div>
 			</div>`;
 	}
 
 	private postState(state: unknown): void {
 		this.panel.webview.postMessage({ type: 'stateUpdate', state });
+		void this.postLastExportRecord(this.readRepositoryFromState(state));
+	}
+
+	private readRepositoryFromState(state: unknown): string | undefined {
+		if (!state || typeof state !== 'object') {
+			return undefined;
+		}
+		const candidate = state as { selectedRepository?: { fullName?: string } };
+		const fullName = candidate.selectedRepository?.fullName;
+		return typeof fullName === 'string' && fullName.length > 0 ? fullName : undefined;
+	}
+
+	private async postLastExportRecord(repositoryHint?: string, force = false): Promise<void> {
+		try {
+			const repository = repositoryHint ?? this.services.issueManager.getSnapshot().selectedRepository?.fullName;
+			const record = repository ? this.getLastExportRecord(repository) : undefined;
+			const signature = JSON.stringify({ repository: repository ?? null, record: record ?? null });
+			if (!force && signature === this.lastExportSignature) {
+				return;
+			}
+			this.lastExportSignature = signature;
+			await this.panel.webview.postMessage({ type: 'ml.lastExport', record });
+		} catch (error) {
+			console.warn('[IssueTriage] Failed to post last export record', error);
+		}
+	}
+
+	private getLastExportRecord(repository: string): StoredExportRecord | undefined {
+		const records = this.services.state.getWorkspace<Record<string, StoredExportRecord>>(LAST_EXPORT_STATE_KEY, {});
+		return records?.[repository];
 	}
 
 	private async handleMessage(message: { type: string; [key: string]: unknown }): Promise<void> {
@@ -1314,6 +1875,7 @@ class IssueTriagePanel {
 			case 'webview.selectRepository':
 				if (typeof message.repository === 'string' && message.repository) {
 					await this.services.issueManager.selectRepository(message.repository);
+					await this.postLastExportRecord(message.repository, true);
 				}
 				break;
 			case 'webview.selectIssue': {
@@ -1546,8 +2108,318 @@ class IssueTriagePanel {
 				}
 				break;
 			}
+			case 'webview.copyIssueForAI': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				if (issueNumber === undefined) {
+					break;
+				}
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName;
+				if (!repository) {
+					break;
+				}
+
+				// Check if issue repository matches workspace
+				const isWorkspaceRepo = await this.services.aiIntegration.isWorkspaceRepository(repository);
+				if (isWorkspaceRepo === false) {
+					const proceed = await vscode.window.showWarningMessage(
+						`The issue is from '${repository}', but your workspace is for a different repository. The AI assistant may not have the correct code context.`,
+						'Copy Anyway',
+						'Cancel'
+					);
+					if (proceed !== 'Copy Anyway') {
+						break;
+					}
+				}
+
+				try {
+					const issueDetails = await this.services.github.getIssueDetails(repository, issueNumber);
+					const assessment = await this.services.assessment.getLatestAssessment(repository, issueNumber);
+					const context = this.services.aiIntegration.formatIssueContext(
+						repository,
+						issueDetails.number,
+						issueDetails.title,
+						issueDetails.body || '',
+						issueDetails.url,
+						assessment ? {
+							compositeScore: assessment.compositeScore,
+							recommendations: assessment.recommendations,
+							summary: assessment.summary
+						} : undefined
+					);
+					await vscode.env.clipboard.writeText(context);
+					void vscode.window.showInformationMessage('Issue context copied to clipboard!');
+					this.services.telemetry.trackEvent('ai.copyIssue', {
+						repository,
+						issue: String(issueNumber),
+						hasAssessment: String(!!assessment),
+						workspaceMatch: String(isWorkspaceRepo ?? 'unknown')
+					});
+				} catch (error) {
+					void vscode.window.showErrorMessage(`Failed to copy issue: ${error instanceof Error ? error.message : 'Unknown error'}`);
+				}
+				break;
+			}
+			case 'webview.sendToAI': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				if (issueNumber === undefined) {
+					break;
+				}
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName;
+				if (!repository) {
+					break;
+				}
+
+				// Check if issue repository matches workspace
+				const isWorkspaceRepo = await this.services.aiIntegration.isWorkspaceRepository(repository);
+				if (isWorkspaceRepo === false) {
+					const proceed = await vscode.window.showWarningMessage(
+						`The issue is from '${repository}', but your workspace is for a different repository. The AI assistant may not have the correct code context.`,
+						'Send Anyway',
+						'Cancel'
+					);
+					if (proceed !== 'Send Anyway') {
+						break;
+					}
+				}
+
+				try {
+					const issueDetails = await this.services.github.getIssueDetails(repository, issueNumber);
+					const assessment = await this.services.assessment.getLatestAssessment(repository, issueNumber);
+					const context = this.services.aiIntegration.formatIssueContext(
+						repository,
+						issueDetails.number,
+						issueDetails.title,
+						issueDetails.body || '',
+						issueDetails.url,
+						assessment ? {
+							compositeScore: assessment.compositeScore,
+							recommendations: assessment.recommendations,
+							summary: assessment.summary
+						} : undefined
+					);
+					const assistants = this.services.aiIntegration.getAvailableAssistants();
+					if (assistants.length === 0) {
+						void vscode.window.showWarningMessage('No AI assistant detected.');
+						break;
+					}
+					await this.services.aiIntegration.sendToAssistant(assistants[0], context);
+					this.services.telemetry.trackEvent('ai.sendToAssistant', {
+						repository,
+						issue: String(issueNumber),
+						assistant: assistants[0].id,
+						hasAssessment: String(!!assessment),
+						workspaceMatch: String(isWorkspaceRepo ?? 'unknown')
+					});
+				} catch (error) {
+					void vscode.window.showErrorMessage(`Failed to send to AI: ${error instanceof Error ? error.message : 'Unknown error'}`);
+				}
+				break;
+			}
+			case 'webview.getKeywordStats': {
+				const stats = await this.getKeywordStats();
+				await this.panel?.webview.postMessage({ type: 'ml.keywordStats', stats });
+				break;
+			}
+			case 'webview.getLastExport': {
+				await this.postLastExportRecord(undefined, true);
+				break;
+			}
+			case 'webview.backfillKeywords': {
+				const mode = message.mode === 'all' ? 'all' : 'missing';
+				await this.handleBackfillKeywords(mode);
+				break;
+			}
+			case 'webview.cancelBackfill': {
+				// Cancel is handled in the backfillKeywords command itself
+				break;
+			}
+			case 'webview.exportDataset': {
+				await this.handleExportDataset();
+				break;
+			}
+			case 'webview.downloadDataset': {
+				await this.handleDownloadDataset();
+				break;
+			}
+			case 'webview.openFolder': {
+				if (typeof message.path === 'string') {
+					const folderPath = path.dirname(message.path);
+					await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(folderPath));
+				}
+				break;
+			}
+			case 'webview.openFile': {
+				if (typeof message.path === 'string') {
+					const doc = await vscode.workspace.openTextDocument(message.path);
+					await vscode.window.showTextDocument(doc);
+				}
+				break;
+			}
 			default:
 				break;
+		}
+	}
+
+	private async getKeywordStats(): Promise<{ totalIssues: number; withKeywords: number; coverage: number }> {
+		try {
+			const snapshot = this.services.issueManager.getSnapshot();
+			const repository = snapshot.selectedRepository?.fullName;
+			if (!repository) {
+				return { totalIssues: 0, withKeywords: 0, coverage: 0 };
+			}
+
+			// Get keyword coverage from risk storage
+			const stats = await this.services.risk.getKeywordCoverage(repository);
+
+			console.log(`[IssueTriage] Keyword stats: ${stats.withKeywords}/${stats.total} (${stats.coverage.toFixed(1)}%)`);
+
+			return {
+				totalIssues: stats.total,
+				withKeywords: stats.withKeywords,
+				coverage: stats.coverage
+			};
+		} catch (error) {
+			console.error('[IssueTriage] Error getting keyword stats:', error);
+			return { totalIssues: 0, withKeywords: 0, coverage: 0 };
+		}
+	}
+
+	private async handleBackfillKeywords(mode: 'missing' | 'all' = 'missing'): Promise<void> {
+		try {
+			const snapshot = this.services.issueManager.getSnapshot();
+			const repository = snapshot.selectedRepository?.fullName;
+			if (!repository) {
+				await this.panel?.webview.postMessage({
+					type: 'ml.backfillComplete',
+					success: false,
+					error: 'No repository selected'
+				});
+				return;
+			}
+
+			// Trigger the command and let it handle progress
+			await vscode.commands.executeCommand('issuetriage.backfillKeywords', mode);
+		} catch (error) {
+			await this.panel?.webview.postMessage({
+				type: 'ml.backfillComplete',
+				success: false,
+				error: error instanceof Error ? error.message : 'Unknown error'
+			});
+		}
+	}
+
+	private async handleExportDataset(): Promise<void> {
+		try {
+			const snapshot = this.services.issueManager.getSnapshot();
+			const repository = snapshot.selectedRepository?.fullName;
+			if (!repository) {
+				await this.panel?.webview.postMessage({
+					type: 'ml.exportComplete',
+					success: false,
+					error: 'No repository selected'
+				});
+				return;
+			}
+
+			const result = await vscode.commands.executeCommand<ExportResult | undefined>('issuetriage.trainModel');
+			console.log('[IssueTriage] handleExportDataset command result', result?.success);
+			if (result) {
+				const validationErrors = result.manifest.validationReport?.errors ?? [];
+				await this.panel?.webview.postMessage({
+					type: 'ml.exportComplete',
+					success: result.success,
+					manifest: result.manifest,
+					manifestPath: result.manifestPath,
+					datasetPath: result.datasetPath,
+					error: result.success ? undefined : validationErrors.join('\n') || 'Dataset validation failed validation checks.'
+				});
+			} else {
+				await this.panel?.webview.postMessage({
+					type: 'ml.exportComplete',
+					success: false,
+					error: 'Dataset export cancelled.'
+				});
+			}
+			await this.postLastExportRecord(undefined, true);
+		} catch (error) {
+			await this.panel?.webview.postMessage({
+				type: 'ml.exportComplete',
+				success: false,
+				error: error instanceof Error ? error.message : 'Unknown error'
+			});
+			await this.postLastExportRecord(undefined, true);
+		}
+	}
+
+	private async handleDownloadDataset(): Promise<void> {
+		try {
+			const snapshot = this.services.issueManager.getSnapshot();
+			const repository = snapshot.selectedRepository?.fullName;
+			if (!repository) {
+				await this.panel.webview.postMessage({
+					type: 'ml.downloadComplete',
+					success: false,
+					error: 'No repository selected'
+				});
+				return;
+			}
+
+			const sanitizedRepo = repository.replace(/[\\/:*?"<>|]/g, '-');
+			const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+			const defaultPath = path.join(os.homedir(), `risk-dataset-${sanitizedRepo}-${timestamp}.json`);
+			const saveUri = await vscode.window.showSaveDialog({
+				title: 'Save Dataset Snapshot',
+				defaultUri: vscode.Uri.file(defaultPath),
+				saveLabel: 'Save Dataset',
+				filters: {
+					'JSON Files': ['json'],
+					'All Files': ['*']
+				}
+			});
+			if (!saveUri) {
+				await this.panel.webview.postMessage({
+					type: 'ml.downloadComplete',
+					success: false,
+					cancelled: true
+				});
+				return;
+			}
+
+			const exportText = await this.services.historicalData.exportDatasetText({ repository });
+			await vscode.workspace.fs.writeFile(saveUri, Buffer.from(exportText.content, 'utf8'));
+			void vscode.window.showInformationMessage(`Dataset saved to ${saveUri.fsPath}`, 'Open File').then(async action => {
+				if (action === 'Open File') {
+					try {
+						const doc = await vscode.workspace.openTextDocument(saveUri);
+						await vscode.window.showTextDocument(doc);
+					} catch (error) {
+						const description = error instanceof Error ? error.message : String(error);
+						void vscode.window.showErrorMessage(`Unable to open dataset: ${description}`);
+					}
+				}
+			});
+			this.services.telemetry.trackEvent('dataset.downloaded', {
+				repository,
+				issues: String(exportText.count),
+				coverage: exportText.keywordCoveragePct.toFixed(1)
+			});
+			await this.panel.webview.postMessage({
+				type: 'ml.downloadComplete',
+				success: true,
+				filePath: saveUri.fsPath,
+				count: exportText.count,
+				coverage: exportText.keywordCoveragePct
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unknown error';
+			void vscode.window.showErrorMessage(`Failed to save dataset: ${message}`);
+			await this.panel.webview.postMessage({
+				type: 'ml.downloadComplete',
+				success: false,
+				error: message
+			});
 		}
 	}
 
@@ -1792,7 +2664,21 @@ class IssueTriagePanel {
 			lines.push(`- Linked pull requests: ${summary.metrics.prCount}`);
 			lines.push(`- Files touched: ${summary.metrics.filesTouched}`);
 			lines.push(`- Total lines changed: ${summary.metrics.changeVolume}`);
-			lines.push(`- Review signals: ${summary.metrics.reviewCommentCount}`);
+			const reviewBreakdown: string[] = [];
+			const prReviewComments = summary.metrics.prReviewCommentCount ?? 0;
+			const prDiscussionComments = summary.metrics.prDiscussionCommentCount ?? 0;
+			const prChangeRequests = summary.metrics.prChangeRequestCount ?? 0;
+			if (prReviewComments > 0) {
+				reviewBreakdown.push(`${prReviewComments} review comment${prReviewComments === 1 ? '' : 's'}`);
+			}
+			if (prDiscussionComments > 0) {
+				reviewBreakdown.push(`${prDiscussionComments} discussion comment${prDiscussionComments === 1 ? '' : 's'}`);
+			}
+			if (prChangeRequests > 0) {
+				reviewBreakdown.push(`${prChangeRequests} change request${prChangeRequests === 1 ? '' : 's'}`);
+			}
+			const reviewSuffix = reviewBreakdown.length ? ` (${reviewBreakdown.join(', ')})` : '';
+			lines.push(`- Review signals: ${summary.metrics.reviewCommentCount}${reviewSuffix}`);
 		}
 		if (summary.topDrivers && summary.topDrivers.length) {
 			lines.push('', '### Risk Drivers');

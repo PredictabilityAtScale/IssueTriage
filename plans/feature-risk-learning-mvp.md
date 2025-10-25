@@ -16,11 +16,12 @@ Enable IssueTriage to quickly identify similar historical work using keyword-bas
 - Use SQLite FTS5 for keyword matching + Jaccard similarity for ranking
 - Display top-5 matches with keyword overlap % and shared labels
 
-**Model Training:**
-- Manual training workflow triggered via "ML Training" tab → `Train Now` button
-- Start with baseline heuristics (historical averages by label/component)
-- Package trained models as local ONNX artifacts alongside the extension
-- Defer automated retraining and server-side aggregation to post-MVP
+**Training Data Preparation (MVP Scope):**
+- Manual export workflow triggered via "ML Training" tab → "Export Dataset" button
+- Validate keyword coverage (95%+ required) and data quality
+- Export SQLite database with FTS5 index ready for external ML training
+- Generate manifest with schema version, record counts, and validation report
+- **Out of scope for MVP:** Model training, inference, and ONNX packaging (future phases)
 
 **API & Quotas:**
 - Daily token budget: 200k tokens (configurable via settings)

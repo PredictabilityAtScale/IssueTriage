@@ -13,6 +13,10 @@ export interface RiskProfileStore {
 	saveProfile(profile: RiskProfile): Promise<void>;
 	getProfile(repository: string, issueNumber: number): Promise<RiskProfile | undefined>;
 	getProfiles(repository: string, issueNumbers: number[]): Promise<RiskProfile[]>;
+	getAllProfiles(repository: string): Promise<RiskProfile[]>;
+	searchByKeywords(repository: string, keywords: string[], limit?: number): Promise<RiskProfile[]>;
+	getClosedIssuesWithoutKeywords(repository: string, limit?: number): Promise<RiskProfile[]>;
+	getKeywordCoverage(repository: string): Promise<{ total: number; withKeywords: number; coverage: number }>;
 }
 
 export class RiskStorage implements RiskProfileStore {
@@ -51,6 +55,9 @@ export class RiskStorage implements RiskProfileStore {
 		const evidenceJson = JSON.stringify(profile.evidence ?? []);
 		const driversJson = JSON.stringify(profile.drivers ?? []);
 		const filtersJson = JSON.stringify(profile.labelFilters ?? []);
+		const keywordsJson = profile.keywords ? JSON.stringify(profile.keywords) : null;
+		const issueLabelsJson = JSON.stringify(profile.issueLabels ?? []);
+		const fileChangesJson = JSON.stringify(profile.fileChanges ?? []);
 
 		this.run(
 			`INSERT INTO risk_profiles (
@@ -63,8 +70,14 @@ export class RiskStorage implements RiskProfileStore {
 				drivers,
 				lookback_days,
 				label_filters,
-				calculated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				calculated_at,
+				keywords,
+				issue_title,
+				issue_summary,
+				issue_labels,
+				change_summary,
+				file_changes
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repository, issue_number) DO UPDATE SET
 				risk_level = excluded.risk_level,
 				risk_score = excluded.risk_score,
@@ -73,7 +86,13 @@ export class RiskStorage implements RiskProfileStore {
 				drivers = excluded.drivers,
 				lookback_days = excluded.lookback_days,
 				label_filters = excluded.label_filters,
-				calculated_at = excluded.calculated_at`,
+				calculated_at = excluded.calculated_at,
+				keywords = excluded.keywords,
+				issue_title = excluded.issue_title,
+				issue_summary = excluded.issue_summary,
+				issue_labels = excluded.issue_labels,
+				change_summary = excluded.change_summary,
+				file_changes = excluded.file_changes`,
 			[
 				profile.repository,
 				profile.issueNumber,
@@ -84,7 +103,13 @@ export class RiskStorage implements RiskProfileStore {
 				driversJson,
 				profile.lookbackDays,
 				filtersJson,
-				profile.calculatedAt
+				profile.calculatedAt,
+				keywordsJson,
+				profile.issueTitle,
+				profile.issueSummary,
+				issueLabelsJson,
+				profile.changeSummary,
+				fileChangesJson
 			]
 		);
 		await this.persist();
@@ -116,6 +141,68 @@ export class RiskStorage implements RiskProfileStore {
 		return rows.map(row => this.mapRow(row));
 	}
 
+	public async getAllProfiles(repository: string): Promise<RiskProfile[]> {
+		await this.initialize();
+		const rows = this.query(
+			`SELECT * FROM risk_profiles
+			WHERE repository = ?
+			ORDER BY issue_number`,
+			[repository]
+		);
+		return rows.map(row => this.mapRow(row));
+	}
+
+	public async searchByKeywords(repository: string, keywords: string[], limit = 10): Promise<RiskProfile[]> {
+		await this.initialize();
+		if (keywords.length === 0) {
+			return [];
+		}
+		
+		// Use simple LIKE queries for keyword matching (no FTS5)
+		// Build WHERE clause with OR conditions for each keyword
+		const likeConditions = keywords.map(() => 'keywords LIKE ?').join(' OR ');
+		const likeParams = keywords.map(kw => `%"${kw.toLowerCase()}"%`);
+		
+		const rows = this.query(
+			`SELECT * FROM risk_profiles
+			WHERE repository = ? AND keywords IS NOT NULL AND (${likeConditions})
+			ORDER BY calculated_at DESC
+			LIMIT ?`,
+			[repository, ...likeParams, limit]
+		);
+		return rows.map(row => this.mapRow(row));
+	}
+
+	public async getClosedIssuesWithoutKeywords(repository: string, limit = 100): Promise<RiskProfile[]> {
+		await this.initialize();
+		const rows = this.query(
+			`SELECT * FROM risk_profiles
+			WHERE repository = ? AND (keywords IS NULL OR keywords = '[]')
+			LIMIT ?`,
+			[repository, limit]
+		);
+		return rows.map(row => this.mapRow(row));
+	}
+
+	public async getKeywordCoverage(repository: string): Promise<{ total: number; withKeywords: number; coverage: number }> {
+		await this.initialize();
+		const totalRows = this.query(
+			`SELECT COUNT(*) as count FROM risk_profiles WHERE repository = ?`,
+			[repository]
+		);
+		const withKeywordsRows = this.query(
+			`SELECT COUNT(*) as count FROM risk_profiles 
+			WHERE repository = ? AND keywords IS NOT NULL AND keywords != '[]'`,
+			[repository]
+		);
+		
+		const total = Number(totalRows[0]?.count ?? 0);
+		const withKeywords = Number(withKeywordsRows[0]?.count ?? 0);
+		const coverage = total > 0 ? (withKeywords / total) * 100 : 0;
+		
+		return { total, withKeywords, coverage };
+	}
+
 	private mapRow(row: Record<string, unknown>): RiskProfile {
 		return {
 			repository: String(row.repository ?? ''),
@@ -130,6 +217,9 @@ export class RiskStorage implements RiskProfileStore {
 					totalDeletions: 0,
 					changeVolume: 0,
 					reviewCommentCount: 0,
+					prReviewCommentCount: 0,
+					prDiscussionCommentCount: 0,
+					prChangeRequestCount: 0,
 					directCommitCount: 0,
 					directCommitAdditions: 0,
 					directCommitDeletions: 0,
@@ -142,7 +232,13 @@ export class RiskStorage implements RiskProfileStore {
 			drivers: this.parseJson(row.drivers, []),
 			lookbackDays: Number(row.lookback_days ?? 0),
 			labelFilters: this.parseJson(row.label_filters, []),
-			calculatedAt: String(row.calculated_at ?? '')
+			calculatedAt: String(row.calculated_at ?? ''),
+			keywords: this.parseJson(row.keywords, undefined),
+			issueTitle: String(row.issue_title ?? ''),
+			issueSummary: String(row.issue_summary ?? ''),
+			issueLabels: this.parseJson(row.issue_labels, []),
+			changeSummary: String(row.change_summary ?? ''),
+			fileChanges: this.parseJson(row.file_changes, [])
 		};
 	}
 
@@ -188,9 +284,50 @@ export class RiskStorage implements RiskProfileStore {
 			lookback_days INTEGER NOT NULL,
 			label_filters TEXT NOT NULL,
 			calculated_at TEXT NOT NULL,
+			keywords TEXT,
+			issue_title TEXT,
+			issue_summary TEXT,
+			issue_labels TEXT,
+			change_summary TEXT,
+			file_changes TEXT,
 			UNIQUE(repository, issue_number)
 		);`);
 		db.run(`CREATE INDEX IF NOT EXISTS idx_risk_profiles_repo_issue ON risk_profiles (repository, issue_number);`);
+		
+		// Add keywords column if it doesn't exist (migration)
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN keywords TEXT;`);
+		} catch (error) {
+			// Column likely already exists, ignore
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN issue_title TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN issue_summary TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN issue_labels TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN change_summary TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN file_changes TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		
+		// Create index for keyword searches (simple LIKE queries instead of FTS5)
+		db.run(`CREATE INDEX IF NOT EXISTS idx_risk_profiles_keywords ON risk_profiles (keywords);`);
 	}
 
 	private run(sql: string, params: SqlValue[] = []): void {

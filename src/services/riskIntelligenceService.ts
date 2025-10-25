@@ -1,7 +1,17 @@
 import * as vscode from 'vscode';
-import type { IssueSummary, IssueRiskSnapshot, PullRequestRiskData, CommitRiskData } from './githubClient';
+import type {
+	IssueSummary,
+	IssueRiskSnapshot,
+	PullRequestRiskData,
+	CommitRiskData,
+	PullRequestBackfillDetail,
+	CommitBackfillDetail
+} from './githubClient';
 import type { RiskProfileStore } from './riskStorage';
-import type { RiskProfile, RiskSummary, RiskMetrics, RiskLevel } from '../types/risk';
+import type { RiskProfile, RiskSummary, RiskMetrics, RiskLevel, RiskFileChange } from '../types/risk';
+import type { KeywordExtractionService } from './keywordExtractionService';
+import { ensureKeywordCoverage } from './keywordUtils';
+import type { KeywordContext } from './keywordUtils';
 
 interface SettingsReader {
 	get<T>(key: string, defaultValue?: T): T | undefined;
@@ -9,6 +19,26 @@ interface SettingsReader {
 
 interface TelemetryClient {
 	trackEvent(name: string, properties?: Record<string, string>, measurements?: Record<string, number>): void;
+}
+
+interface GitHubIssueClient {
+	getIssueRiskSnapshot(repository: string, issueNumber: number): Promise<IssueRiskSnapshot>;
+	getIssueDetails(repository: string, issueNumber: number): Promise<{
+		number: number;
+		title: string;
+		body: string;
+		url: string;
+		repository: string;
+		author: string;
+		labels: string[];
+		assignees: string[];
+		milestone?: string;
+		updatedAt: string;
+		createdAt?: string;
+		state: 'open' | 'closed';
+	}>;
+	getPullRequestBackfillDetail(repository: string, pullNumber: number): Promise<PullRequestBackfillDetail>;
+	getCommitBackfillDetail(repository: string, sha: string): Promise<CommitBackfillDetail>;
 }
 
 type RiskTask = {
@@ -42,9 +72,10 @@ export class RiskIntelligenceService implements vscode.Disposable {
 
 	constructor(
 		private readonly storage: RiskProfileStore,
-		private readonly github: { getIssueRiskSnapshot(repository: string, issueNumber: number): Promise<IssueRiskSnapshot> },
+		private readonly github: GitHubIssueClient,
 		private readonly settings: SettingsReader,
-		private readonly telemetry: TelemetryClient
+		private readonly telemetry: TelemetryClient,
+		private readonly keywordExtractor?: KeywordExtractionService
 	) {}
 
 	public async primeIssues(repository: string, issues: IssueSummary[]): Promise<Map<number, RiskSummary>> {
@@ -95,6 +126,10 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			this.cacheProfile(repoKey, stored);
 		}
 		return stored;
+	}
+
+	public async getKeywordCoverage(repository: string): Promise<{ total: number; withKeywords: number; coverage: number }> {
+		return this.storage.getKeywordCoverage(repository);
 	}
 
 	public async waitForIdle(timeoutMs = 10_000): Promise<void> {
@@ -258,7 +293,7 @@ export class RiskIntelligenceService implements vscode.Disposable {
 				return;
 			}
 
-			const profile = this.buildProfile(task, snapshot);
+			const profile = await this.buildProfile(task, snapshot);
 			await this.storage.saveProfile(profile);
 			this.cacheProfile(repoKey, profile);
 			const summary = this.toSummary(profile, false);
@@ -285,7 +320,7 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		}
 	}
 
-	private buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot): RiskProfile {
+	private async buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot): Promise<RiskProfile> {
 		const pullRequests = snapshot.pullRequests ?? [];
 		const commits = snapshot.commits ?? [];
 		const metrics = this.computeMetrics(pullRequests, commits);
@@ -293,6 +328,25 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		const riskLevel = this.scoreToLevel(riskScore);
 		const drivers = this.identifyDrivers(metrics);
 		const evidence = this.buildEvidence(pullRequests, commits);
+		const issue = await this.github.getIssueDetails(task.repository, task.issueNumber);
+		const fileChanges = await this.collectFileChanges(task.repository, pullRequests, commits);
+		const issueSummary = this.buildIssueSummary(issue.body);
+		const changeSummary = this.buildChangeSummary(metrics, evidence, fileChanges);
+		const keywordContext = {
+			issueTitle: issue.title,
+			issueBody: issue.body,
+			labels: issue.labels,
+			evidenceSummaries: evidence.map(item => item.prSummary ?? item.detail ?? item.label),
+			filePaths: fileChanges.map(file => file.path),
+			changeSummary,
+			repository: task.repository
+		};
+
+		let keywords = this.keywordExtractor ? await this.tryExtractKeywords(task, issue.title, issue.body, keywordContext) : undefined;
+		if (!keywords || keywords.length === 0) {
+			keywords = ensureKeywordCoverage(undefined, keywordContext);
+		}
+
 		return {
 			repository: task.repository,
 			issueNumber: task.issueNumber,
@@ -303,8 +357,150 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			drivers,
 			lookbackDays: task.lookbackDays,
 			labelFilters: task.labelFilters,
-			calculatedAt: new Date().toISOString()
+			calculatedAt: new Date().toISOString(),
+			keywords: keywords.length ? keywords : undefined,
+			issueTitle: issue.title,
+			issueSummary,
+			issueLabels: issue.labels,
+			changeSummary,
+			fileChanges
 		};
+	}
+
+	private async tryExtractKeywords(
+		task: RiskTask,
+		title: string,
+		body: string,
+		context: KeywordContext
+	): Promise<string[] | undefined> {
+		if (!this.keywordExtractor) {
+			return undefined;
+		}
+		try {
+			const result = await this.keywordExtractor.extractKeywords(title, body, task.issueNumber);
+			return ensureKeywordCoverage(result.keywords, context);
+		} catch (error) {
+			this.telemetry.trackEvent('risk.keywordExtractionFailed', {
+				repository: task.repository,
+				issue: String(task.issueNumber),
+				message: error instanceof Error ? error.message : String(error)
+			});
+			return undefined;
+		}
+	}
+
+	private buildIssueSummary(body: string): string {
+		const normalized = (body ?? '').replace(/\r/g, '');
+		const paragraphs = normalized
+			.split('\n')
+			.map(line => line.trim())
+			.filter(line => line.length > 0);
+		const candidate = paragraphs.slice(0, 2).join(' ');
+		const summary = candidate || normalized.slice(0, 320);
+		const trimmed = summary.trim();
+		if (!trimmed) {
+			return '';
+		}
+		return trimmed.length > 320 ? `${trimmed.slice(0, 317)}...` : trimmed;
+	}
+
+	private buildChangeSummary(
+		metrics: RiskMetrics,
+		evidence: RiskProfile['evidence'],
+		fileChanges: RiskFileChange[]
+	): string {
+		const parts: string[] = [];
+		if (metrics.prCount > 0) {
+			parts.push(`${metrics.prCount} PR${metrics.prCount === 1 ? '' : 's'} merged`);
+		}
+		if (metrics.directCommitCount > 0) {
+			parts.push(`${metrics.directCommitCount} direct commit${metrics.directCommitCount === 1 ? '' : 's'}`);
+		}
+		if (metrics.filesTouched > 0) {
+			parts.push(`${metrics.filesTouched} files touched (+${metrics.totalAdditions}/-${metrics.totalDeletions})`);
+		}
+		if (fileChanges.length > 0) {
+			const topFiles = fileChanges.slice(0, 3).map(file => file.path);
+			parts.push(`Focus areas: ${topFiles.join(', ')}`);
+		}
+		const headline = evidence.find(item => item.prSummary);
+		if (headline?.prSummary) {
+			parts.push(`Recent work: ${headline.prSummary}`);
+		} else if (evidence[0]?.detail) {
+			parts.push(`Recent work: ${evidence[0].detail}`);
+		}
+		return parts.join('. ');
+	}
+
+	private async collectFileChanges(
+		repository: string,
+		pullRequests: PullRequestRiskData[],
+		commits: CommitRiskData[]
+	): Promise<RiskFileChange[]> {
+		const aggregated = new Map<string, { additions: number; deletions: number; references: Set<string> }>();
+		const maxSources = 3;
+		const maxFilesPerSource = 50;
+
+		const record = (path: string, additions: number, deletions: number, reference: string) => {
+			const normalizedPath = path?.trim();
+			if (!normalizedPath) {
+				return;
+			}
+			const entry = aggregated.get(normalizedPath) ?? {
+				additions: 0,
+				deletions: 0,
+				references: new Set<string>()
+			};
+			entry.additions += additions;
+			entry.deletions += deletions;
+			entry.references.add(reference);
+			aggregated.set(normalizedPath, entry);
+		};
+
+		if (pullRequests.length > 0) {
+			for (const pr of pullRequests.slice(0, maxSources)) {
+				try {
+					const detail = await this.github.getPullRequestBackfillDetail(repository, pr.number);
+					for (const file of detail.files.slice(0, maxFilesPerSource)) {
+						record(file.path, file.additions ?? 0, file.deletions ?? 0, `PR #${pr.number}`);
+					}
+				} catch (error) {
+					this.telemetry.trackEvent('risk.fileCollectionFailed', {
+						repository,
+						reference: `PR #${pr.number}`,
+						source: 'pull_request',
+						message: error instanceof Error ? error.message : String(error)
+					});
+				}
+			}
+		} else {
+			for (const commit of commits.slice(0, maxSources)) {
+				try {
+					const detail = await this.github.getCommitBackfillDetail(repository, commit.sha);
+					for (const file of detail.files.slice(0, maxFilesPerSource)) {
+						record(file.path, file.additions ?? 0, file.deletions ?? 0, commit.sha.slice(0, 7));
+					}
+				} catch (error) {
+					this.telemetry.trackEvent('risk.fileCollectionFailed', {
+						repository,
+						reference: commit.sha.slice(0, 7),
+						source: 'commit',
+						message: error instanceof Error ? error.message : String(error)
+					});
+				}
+			}
+		}
+
+		return Array.from(aggregated.entries())
+			.map(([path, info]) => ({
+				path,
+				additions: info.additions,
+				deletions: info.deletions,
+				changeVolume: info.additions + info.deletions,
+				references: Array.from(info.references).slice(0, 5)
+			}))
+			.sort((a, b) => b.changeVolume - a.changeVolume)
+			.slice(0, maxFilesPerSource);
 	}
 
 	private computeMetrics(pullRequests: PullRequestRiskData[], commits: CommitRiskData[]): RiskMetrics {
@@ -316,6 +512,9 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			totalDeletions: 0,
 			changeVolume: 0,
 			reviewCommentCount: 0,
+			prReviewCommentCount: 0,
+			prDiscussionCommentCount: 0,
+			prChangeRequestCount: 0,
 			directCommitCount: 0,
 			directCommitAdditions: 0,
 			directCommitDeletions: 0,
@@ -328,7 +527,13 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			metrics.totalAdditions += pr.additions ?? 0;
 			metrics.totalDeletions += pr.deletions ?? 0;
 			metrics.changeVolume += (pr.additions ?? 0) + (pr.deletions ?? 0);
-			const reviewFriction = (pr.reviewComments ?? 0) + (pr.comments ?? 0) + (pr.reviewStates?.CHANGES_REQUESTED ?? 0) * 2;
+			const reviewComments = pr.reviewComments ?? 0;
+			const discussionComments = pr.comments ?? 0;
+			const changeRequests = pr.reviewStates?.CHANGES_REQUESTED ?? 0;
+			metrics.prReviewCommentCount += reviewComments;
+			metrics.prDiscussionCommentCount += discussionComments;
+			metrics.prChangeRequestCount += changeRequests;
+			const reviewFriction = reviewComments + discussionComments + changeRequests * 2;
 			metrics.reviewCommentCount += reviewFriction;
 		}
 
@@ -422,8 +627,12 @@ export class RiskIntelligenceService implements vscode.Disposable {
 				filesTouched: profile.metrics.filesTouched,
 				changeVolume: profile.metrics.changeVolume,
 				reviewCommentCount: profile.metrics.reviewCommentCount,
-				directCommitCount: profile.metrics.directCommitCount
+				directCommitCount: profile.metrics.directCommitCount,
+				prReviewCommentCount: profile.metrics.prReviewCommentCount,
+				prDiscussionCommentCount: profile.metrics.prDiscussionCommentCount,
+				prChangeRequestCount: profile.metrics.prChangeRequestCount
 			},
+			keywords: profile.keywords?.slice(0, 8),
 			stale
 		};
 	}

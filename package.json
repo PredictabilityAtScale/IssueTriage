@@ -2,6 +2,7 @@
   "name": "issuetriage",
   "displayName": "IssueTriage",
   "description": "An automated issue triage for risk and readiness assessment",
+  "publisher": "PredictabilityAtScale",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.105.0"
@@ -38,18 +39,13 @@
         "category": "Issue Triage"
       },
       {
-        "command": "issuetriage.signOut",
-        "title": "Issue Triage: Sign Out",
+        "command": "issuetriage.backfillKeywords",
+        "title": "Issue Triage: Backfill Keywords",
         "category": "Issue Triage"
       },
       {
-        "command": "issuetriage.connectRepository",
-        "title": "Issue Triage: Connect Repository",
-        "category": "Issue Triage"
-      },
-      {
-        "command": "issuetriage.refreshIssues",
-        "title": "Issue Triage: Refresh Issues",
+        "command": "issuetriage.trainModel",
+        "title": "Issue Triage: Export Training Dataset",
         "category": "Issue Triage"
       },
       {

@@ -7,6 +7,9 @@ export interface RiskMetrics {
 	totalDeletions: number;
 	changeVolume: number;
 	reviewCommentCount: number;
+	prReviewCommentCount: number;
+	prDiscussionCommentCount: number;
+	prChangeRequestCount: number;
 	directCommitCount: number;
 	directCommitAdditions: number;
 	directCommitDeletions: number;
@@ -21,6 +24,14 @@ export interface RiskEvidence {
 	prNumber?: number;
 }
 
+export interface RiskFileChange {
+	path: string;
+	additions: number;
+	deletions: number;
+	changeVolume: number;
+	references: string[];
+}
+
 export interface RiskProfile {
 	repository: string;
 	issueNumber: number;
@@ -32,6 +43,12 @@ export interface RiskProfile {
 	metrics: RiskMetrics;
 	evidence: RiskEvidence[];
 	drivers: string[];
+	issueTitle: string;
+	issueSummary: string;
+	issueLabels: string[];
+	changeSummary: string;
+	fileChanges: RiskFileChange[];
+	keywords?: string[];
 }
 
 export interface RiskSummary {
@@ -40,7 +57,66 @@ export interface RiskSummary {
 	riskScore?: number;
 	calculatedAt?: string;
 	topDrivers?: string[];
-	metrics?: Pick<RiskMetrics, 'prCount' | 'filesTouched' | 'changeVolume' | 'reviewCommentCount' | 'directCommitCount'>;
+	metrics?: Pick<RiskMetrics, 'prCount' | 'filesTouched' | 'changeVolume' | 'reviewCommentCount' | 'directCommitCount' | 'prReviewCommentCount' | 'prDiscussionCommentCount' | 'prChangeRequestCount'>;
 	message?: string;
 	stale?: boolean;
+	keywords?: string[];
+}
+
+/**
+ * Similarity match result with keyword overlap analysis
+ */
+export interface SimilarIssue {
+	repository: string;
+	issueNumber: number;
+	riskLevel: RiskLevel;
+	riskScore: number;
+	keywords: string[];
+	overlapScore: number;
+	sharedKeywords: string[];
+	calculatedAt: string;
+}
+
+/**
+ * Export manifest for historical dataset
+ */
+export interface ExportManifest {
+	exportRunId: string;
+	repoSlug: string;
+	issuesExported: number;
+	snapshotsExported: number;
+	keywordCoveragePct: number;
+	exportStartedAt: string;
+	exportCompletedAt: string;
+	schemaVersion: string;
+	tokenUsageSummary?: {
+		totalTokens: number;
+		estimatedCost?: number;
+	};
+	validationReport: {
+		passed: boolean;
+		warnings: string[];
+		errors: string[];
+	};
+}
+
+/**
+ * Backfill progress tracking
+ */
+export interface BackfillProgress {
+	totalIssues: number;
+	processedIssues: number;
+	successCount: number;
+	failureCount: number;
+	skippedCount: number;
+	currentIssue?: number;
+	status: 'running' | 'completed' | 'failed' | 'cancelled';
+	startedAt: string;
+	completedAt?: string;
+	tokensUsed: number;
+	errors: Array<{
+		issueNumber: number;
+		message: string;
+	}>;
+	mode?: 'missing' | 'all';
 }
