@@ -82,6 +82,17 @@ interface ResolvedUnlinkedRecord {
 
 type ResolvedUnlinkedState = Record<string, ResolvedUnlinkedRecord>;
 
+interface QuestionResponse {
+	answer: string;
+	answeredAt: string;
+	commentId?: number;
+	commentUrl?: string;
+}
+
+type IssueQuestionResponseMap = Record<string, QuestionResponse>;
+type RepositoryQuestionResponses = Record<string, IssueQuestionResponseMap>;
+type StoredQuestionResponses = Record<string, RepositoryQuestionResponses>;
+
 interface IssueManagerState {
 	loading: boolean;
 	error?: string;
@@ -101,11 +112,13 @@ interface IssueManagerState {
 	assessmentSummaries: Record<number, IssueAssessmentSummary>;
 	dashboardMetrics?: DashboardMetrics;
 	unlinkedWork: UnlinkedWorkState;
+	questionResponses: RepositoryQuestionResponses;
 }
 
 const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
 const WORKSPACE_FILTER_KEY = 'issuetriage.repository.filters';
 const WORKSPACE_RESOLVED_UNLINKED_KEY = 'issuetriage.unlinked.resolved';
+const WORKSPACE_QUESTION_RESPONSES_KEY = 'issuetriage.assessment.questionResponses';
 const DEFAULT_FILTERS: FilterState = {
 	state: 'open',
 	readiness: 'all'
@@ -131,11 +144,13 @@ export class IssueManager implements vscode.Disposable {
 			loading: false,
 			pullRequests: [],
 			commits: []
-		}
+		},
+		questionResponses: {}
 	};
 	private allIssues: IssueSummary[] = [];
 	private disposables: vscode.Disposable[] = [];
 	private resolvedUnlinked: ResolvedUnlinkedState = {};
+ 	private questionResponsesStore: StoredQuestionResponses = {};
 
 	constructor(
 		private readonly auth: GitHubAuthService,
@@ -149,6 +164,7 @@ export class IssueManager implements vscode.Disposable {
 		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
 		this.disposables.push(riskSubscription);
 		this.resolvedUnlinked = this.stateService.getWorkspace<ResolvedUnlinkedState>(WORKSPACE_RESOLVED_UNLINKED_KEY, {}) ?? {};
+		this.questionResponsesStore = this.stateService.getWorkspace<StoredQuestionResponses>(WORKSPACE_QUESTION_RESPONSES_KEY, {}) ?? {};
 	}
 
 		public readonly onDidChangeState = this.emitter.event;
@@ -166,6 +182,7 @@ export class IssueManager implements vscode.Disposable {
 				this.state.selectedRepository = storedRepository;
 				this.workspaceRepositorySlug = this.normalizeRepositorySlug(storedRepository.fullName);
 			}
+			this.applyQuestionResponseState(this.state.selectedRepository?.fullName);
 			this.state.filters = this.ensureFilterDefaults(storedFilters);
 			if (!storedRepository) {
 				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
@@ -250,6 +267,66 @@ export class IssueManager implements vscode.Disposable {
 		}
 	}
 
+	public async answerAssessmentQuestion(issueNumber: number, question: string, answer: string): Promise<{ repository: string; question: string; response: QuestionResponse; commentUrl?: string }> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			throw new Error('Select a repository before answering assessment questions.');
+		}
+		const normalizedQuestion = this.normalizeQuestionKey(question ?? '');
+		if (!normalizedQuestion) {
+			throw new Error('Question text is required.');
+		}
+		const trimmedAnswer = (answer ?? '').trim();
+		if (!trimmedAnswer) {
+			throw new Error('Provide an answer before submitting.');
+		}
+
+		const commentBody = this.buildQuestionComment(normalizedQuestion, trimmedAnswer);
+		let commentId: number | undefined;
+		try {
+			commentId = await this.github.upsertIssueComment(repository, issueNumber, commentBody);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.questions.answerFailed', {
+				repository,
+				issue: String(issueNumber),
+				message
+			});
+			throw new Error(`Failed to post answer: ${message}`);
+		}
+
+		const commentUrl = commentId ? `https://github.com/${repository}/issues/${issueNumber}#issuecomment-${commentId}` : undefined;
+		const repoKey = this.getQuestionStoreKey(repository);
+		const repositoryResponses = this.questionResponsesStore[repoKey] ?? {};
+		const issueKey = String(issueNumber);
+		const issueResponses = repositoryResponses[issueKey] ?? {};
+		const response: QuestionResponse = {
+			answer: trimmedAnswer,
+			answeredAt: new Date().toISOString(),
+			commentId,
+			commentUrl
+		};
+		issueResponses[normalizedQuestion] = response;
+		repositoryResponses[issueKey] = issueResponses;
+		this.questionResponsesStore[repoKey] = repositoryResponses;
+
+		this.state.questionResponses = {
+			...this.state.questionResponses,
+			[issueKey]: {
+				...(this.state.questionResponses[issueKey] ?? {}),
+				[normalizedQuestion]: { ...response }
+			}
+		};
+
+		await this.persistQuestionResponses();
+		this.telemetry.trackEvent('issueManager.questions.answered', {
+			repository,
+			issue: String(issueNumber)
+		});
+		this.emitState();
+		return { repository, question: normalizedQuestion, response, commentUrl };
+	}
+
 	public async refreshRepositories(forceRefresh = false): Promise<void> {
 		this.setLoading(true);
 		try {
@@ -273,6 +350,7 @@ export class IssueManager implements vscode.Disposable {
 					this.state.selectedRepository = undefined;
 				}
 			}
+			this.applyQuestionResponseState(this.state.selectedRepository?.fullName);
 			this.emitState();
 		} catch (error) {
 			this.handleUserFacingError('Failed to load repositories from GitHub.', error);
@@ -293,6 +371,7 @@ export class IssueManager implements vscode.Disposable {
 		this.state.selectedRepository = repository;
 		this.workspaceRepositorySlug = this.normalizeRepositorySlug(repository.fullName);
 		this.state.riskSummaries = {};
+		this.applyQuestionResponseState(repository.fullName);
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, repository);
 		this.emitState();
 		if (refresh) {
@@ -337,7 +416,8 @@ export class IssueManager implements vscode.Disposable {
 				loading: false,
 				pullRequests: [],
 				commits: []
-			}
+			},
+			questionResponses: {}
 		};
 		this.allIssues = [];
 		this.resolvedUnlinked = {};
@@ -790,6 +870,53 @@ export class IssueManager implements vscode.Disposable {
 		await this.stateService.updateWorkspace(WORKSPACE_RESOLVED_UNLINKED_KEY, this.resolvedUnlinked);
 	}
 
+	private applyQuestionResponseState(repository?: string): void {
+		if (!repository) {
+			this.state.questionResponses = {};
+			return;
+		}
+		const repoKey = this.getQuestionStoreKey(repository);
+		const stored = this.questionResponsesStore[repoKey];
+		this.state.questionResponses = stored ? this.cloneQuestionResponses(stored) : {};
+	}
+
+	private async persistQuestionResponses(): Promise<void> {
+		await this.stateService.updateWorkspace(WORKSPACE_QUESTION_RESPONSES_KEY, this.questionResponsesStore);
+	}
+
+	private getQuestionStoreKey(repository: string): string {
+		return this.normalizeRepositorySlug(repository) ?? repository.toLowerCase();
+	}
+
+	private cloneQuestionResponses(source: RepositoryQuestionResponses): RepositoryQuestionResponses {
+		const clone: RepositoryQuestionResponses = {};
+		Object.entries(source ?? {}).forEach(([issueNumber, responses]) => {
+			const issueClone: IssueQuestionResponseMap = {};
+			Object.entries(responses ?? {}).forEach(([questionKey, response]) => {
+				issueClone[questionKey] = { ...response };
+			});
+			clone[issueNumber] = issueClone;
+		});
+		return clone;
+	}
+
+	private normalizeQuestionKey(question: string): string {
+		return question.trim();
+	}
+
+	private buildQuestionComment(question: string, answer: string): string {
+		const lines = [
+			'### IssueTriage Clarification',
+			`**Question:** ${question}`,
+			'',
+			'**Answer:**',
+			answer,
+			'',
+			'_Captured via IssueTriage assessment panel_.'
+		];
+		return lines.join('\n');
+	}
+
 	private calculateCommitLookbackIso(): string {
 		const configured = this.settings.get<number>('backfill.commitWindowDays');
 		const days = (typeof configured === 'number' && Number.isFinite(configured) && configured > 0)
@@ -940,7 +1067,8 @@ export class IssueManager implements vscode.Disposable {
 				...this.state.unlinkedWork,
 				pullRequests: [...this.state.unlinkedWork.pullRequests],
 				commits: [...this.state.unlinkedWork.commits]
-			}
+			},
+			questionResponses: this.cloneQuestionResponses(this.state.questionResponses)
 		});
 	}
 

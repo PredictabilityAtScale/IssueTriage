@@ -1295,6 +1295,105 @@ class IssueTriagePanel {
 					margin-bottom: 6px;
 				}
 
+				.question-list {
+					margin: 0;
+					padding: 0;
+					list-style: none;
+					display: grid;
+					gap: 12px;
+				}
+
+				.assessment-question {
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+					padding: 12px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 95%, var(--vscode-button-background) 5%);
+				}
+
+				.assessment-question.pending {
+					background: color-mix(in srgb, var(--vscode-editor-background) 97%, var(--vscode-button-background) 3%);
+				}
+
+				.assessment-question.answered {
+					border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #2ea043) 45%, transparent 55%);
+					background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-testing-iconPassed, #2ea043) 8%);
+				}
+
+				.question-text {
+					margin: 0 0 8px 0;
+					font-weight: 600;
+				}
+
+				.question-form {
+					display: flex;
+					flex-direction: column;
+					gap: 8px;
+				}
+
+				.question-form textarea {
+					resize: vertical;
+					min-height: 72px;
+					padding: 8px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.35));
+					font: inherit;
+					background: var(--vscode-editor-background);
+					color: inherit;
+				}
+
+				.question-form textarea:focus {
+					outline: 1px solid var(--vscode-focusBorder, #0078d4);
+					outline-offset: 2px;
+				}
+
+				.question-actions {
+					display: flex;
+					gap: 8px;
+					align-items: center;
+					flex-wrap: wrap;
+				}
+
+				.question-error .question-form textarea {
+					border-color: var(--vscode-errorForeground, #f48771);
+					box-shadow: 0 0 0 1px color-mix(in srgb, var(--vscode-errorForeground, #f48771) 60%, transparent 40%);
+				}
+
+				.question-error-message {
+					color: var(--vscode-errorForeground, #f48771);
+					font-size: 12px;
+				}
+
+				.question-meta {
+					display: flex;
+					gap: 8px;
+					align-items: center;
+					flex-wrap: wrap;
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					margin-bottom: 8px;
+				}
+
+				.question-answer-display {
+					font-size: 13px;
+					line-height: 1.5;
+				}
+
+				.question-empty {
+					margin: 0;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.assessment-hint {
+					margin-top: 12px;
+					padding: 10px;
+					border-radius: 6px;
+					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					display: flex;
+					gap: 12px;
+					align-items: center;
+					flex-wrap: wrap;
+				}
+
 				.assessment-actions {
 					display: flex;
 					gap: 8px;
@@ -1992,6 +2091,42 @@ class IssueTriagePanel {
 					await vscode.env.openExternal(vscode.Uri.parse(message.url));
 				}
 				break;
+			case 'webview.answerAssessmentQuestion': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				const rawQuestion = this.normalizeString(message.question)?.trim();
+				const rawAnswer = this.normalizeString(message.answer)?.trim();
+				if (issueNumber === undefined || !rawQuestion || !rawAnswer) {
+					this.panel.webview.postMessage({
+						type: 'assessment.questionAnswerError',
+						issueNumber,
+						question: rawQuestion ?? '',
+						error: 'Question and answer are required.'
+					});
+					break;
+				}
+				try {
+					const result = await this.services.issueManager.answerAssessmentQuestion(issueNumber, rawQuestion, rawAnswer);
+					this.panel.webview.postMessage({
+						type: 'assessment.questionAnswered',
+						issueNumber,
+						question: result.question,
+						answer: result.response.answer,
+						commentUrl: result.commentUrl,
+						answeredAt: result.response.answeredAt
+					});
+					vscode.window.showInformationMessage(`Posted answer for #${issueNumber}.`);
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : String(error);
+					this.panel.webview.postMessage({
+						type: 'assessment.questionAnswerError',
+						issueNumber,
+						question: rawQuestion,
+						error: errorMessage
+					});
+					vscode.window.showErrorMessage(`Unable to post answer: ${errorMessage}`);
+				}
+				break;
+			}
 			case 'webview.runAssessment': {
 				const issueNumber = this.parseIssueNumber(message.issueNumber);
 				if (issueNumber === undefined) {

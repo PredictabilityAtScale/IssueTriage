@@ -107,6 +107,44 @@
 	/** @type {number | undefined} */
 	let searchDebounceHandle = undefined;
 	let bulkAssessmentPending = false;
+	const pendingAnswers = new Set();
+
+	/**
+	 * @param {string} question
+	 */
+	function normalizeQuestionKey(question) {
+		return typeof question === 'string' ? question.trim() : '';
+	}
+
+	/**
+	 * @param {string} value
+	 */
+	function encodeValue(value) {
+		return encodeURIComponent(value);
+	}
+
+	/**
+	 * @param {string | null} value
+	 */
+	function decodeValue(value) {
+		if (typeof value !== 'string') {
+			return '';
+		}
+		try {
+			return decodeURIComponent(value);
+		} catch (error) {
+			console.warn('[IssueTriage] Failed to decode value', error);
+			return value;
+		}
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 * @param {string} question
+	 */
+	function buildAnswerKey(issueNumber, question) {
+		return `${issueNumber}::${normalizeQuestionKey(question)}`;
+	}
 
 	window.addEventListener('message', event => {
 		const message = event.data;
@@ -145,6 +183,12 @@
 				break;
 			case 'assessment.historyError':
 				console.warn('[IssueTriage] Failed to load assessment history:', message.message);
+				break;
+			case 'assessment.questionAnswered':
+				handleQuestionAnswered(message);
+				break;
+			case 'assessment.questionAnswerError':
+				handleQuestionAnswerError(message);
 				break;
 			case 'assessment.bulkComplete':
 				bulkAssessmentPending = false;
@@ -541,6 +585,58 @@
 			if (typeof selectedIssueNumber === 'number') {
 				vscodeApi.postMessage({ type: 'webview.exportAssessment', issueNumber: selectedIssueNumber, format: 'json' });
 			}
+		} else if (action === 'submitAnswer') {
+			if (typeof selectedIssueNumber !== 'number') {
+				return;
+			}
+			const item = button.closest('.assessment-question');
+			if (!(item instanceof HTMLElement)) {
+				return;
+			}
+			const encodedOriginal = item.getAttribute('data-question-original');
+			const question = decodeValue(encodedOriginal).trim();
+			const textarea = item.querySelector('textarea');
+			if (!(textarea instanceof HTMLTextAreaElement)) {
+				return;
+			}
+			const answer = textarea.value.trim();
+			if (!answer) {
+				item.classList.add('question-error');
+				const errorEl = item.querySelector('.question-error-message');
+				if (errorEl) {
+					errorEl.textContent = 'Enter an answer before submitting.';
+				}
+				try {
+					textarea.focus({ preventScroll: true });
+				} catch (error) {
+					textarea.focus();
+				}
+				return;
+			}
+			const answerKey = buildAnswerKey(selectedIssueNumber, question);
+			if (pendingAnswers.has(answerKey)) {
+				return;
+			}
+			pendingAnswers.add(answerKey);
+			item.classList.remove('question-error');
+			const errorEl = item.querySelector('.question-error-message');
+			if (errorEl) {
+				errorEl.textContent = '';
+			}
+			const submitButton = /** @type {HTMLButtonElement} */ (button);
+			submitButton.disabled = true;
+			submitButton.textContent = 'Posting…';
+			textarea.disabled = true;
+			vscodeApi.postMessage({
+				type: 'webview.answerAssessmentQuestion',
+				issueNumber: selectedIssueNumber,
+				question,
+				answer
+			});
+		} else if (action === 'rerunAssessment') {
+			if (typeof selectedIssueNumber === 'number') {
+				vscodeApi.postMessage({ type: 'webview.runAssessment', issueNumber: selectedIssueNumber });
+			}
 		}
 	});
 
@@ -819,6 +915,9 @@
 		renderMLTrainingPanel();
 		enforceSelection();
 		renderRiskDisplay(selectedIssueNumber);
+		if (latestAssessment && latestAssessment.issueNumber === selectedIssueNumber) {
+			renderAssessmentResult(latestAssessment);
+		}
 	}
 
 	/**
@@ -1043,6 +1142,112 @@
 		}
 		const summary = typeof issueNumber === 'number' ? getRiskSummary(issueNumber) : undefined;
 		container.innerHTML = renderRiskSection(summary);
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 */
+	function getQuestionResponsesForIssue(issueNumber) {
+		const repositoryResponses = latestState && typeof latestState === 'object'
+			? latestState.questionResponses
+			: undefined;
+		if (!repositoryResponses || typeof repositoryResponses !== 'object') {
+			return {};
+		}
+		const issueKey = String(issueNumber);
+		const responses = repositoryResponses[issueKey];
+		return responses && typeof responses === 'object' ? responses : {};
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 * @param {any[]} questions
+	 */
+	function renderAssessmentQuestionList(issueNumber, questions) {
+		if (!Array.isArray(questions) || questions.length === 0) {
+			return '<p class="question-empty">No open questions identified.</p>';
+		}
+		const responses = getQuestionResponsesForIssue(issueNumber);
+		const items = questions.map((question, index) => renderAssessmentQuestion(issueNumber, question, index, responses)).join('');
+		return '<ul class="question-list">' + items + '</ul>';
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 * @param {any} rawQuestion
+	 * @param {number} index
+	 * @param {Record<string, any>} responses
+	 */
+	function renderAssessmentQuestion(issueNumber, rawQuestion, index, responses) {
+		const fallback = typeof rawQuestion === 'string' ? rawQuestion : String(rawQuestion ?? '');
+		const trimmed = fallback.trim();
+		const canonicalQuestion = trimmed || fallback;
+		const displayText = canonicalQuestion || `Question ${index + 1}`;
+		const normalized = normalizeQuestionKey(canonicalQuestion);
+		const encodedKey = encodeValue(normalized);
+		const encodedOriginal = encodeValue(canonicalQuestion);
+		const labelId = `question-${issueNumber}-${index}`;
+		const answerId = `${labelId}-answer`;
+		const response = responses[normalized];
+		if (response) {
+			const answeredAtText = typeof response.answeredAt === 'string' && response.answeredAt
+				? new Date(response.answeredAt).toLocaleString()
+				: undefined;
+			const metaSegments = [];
+			if (answeredAtText) {
+				metaSegments.push('<span>Answered ' + escapeHtml(answeredAtText) + '</span>');
+			}
+			if (typeof response.commentUrl === 'string' && response.commentUrl.length) {
+				metaSegments.push('<button type="button" class="button-link" data-action="openComment" data-url="' + escapeHtml(response.commentUrl) + '">View comment</button>');
+			}
+			const metaHtml = metaSegments.length ? '<div class="question-meta">' + metaSegments.join(' ') + '</div>' : '';
+			return '<li class="assessment-question answered" data-question-key="' + encodedKey + '" data-question-original="' + encodedOriginal + '">' +
+				'<p class="question-text" id="' + labelId + '">' + escapeHtml(displayText) + '</p>' +
+				metaHtml +
+				'<div class="question-answer-display">' + formatAnswerForDisplay(response.answer) + '</div>' +
+			'</li>';
+		}
+		return '<li class="assessment-question pending" data-question-key="' + encodedKey + '" data-question-original="' + encodedOriginal + '">' +
+			'<p class="question-text" id="' + labelId + '">' + escapeHtml(displayText) + '</p>' +
+			'<div class="question-form">' +
+				'<textarea id="' + answerId + '" aria-labelledby="' + labelId + '" rows="3" placeholder="Capture the answer so automation can proceed."></textarea>' +
+				'<div class="question-actions">' +
+					'<button type="button" class="primary question-submit" data-action="submitAnswer">Submit answer</button>' +
+					'<span class="question-error-message" role="status" aria-live="polite"></span>' +
+				'</div>' +
+			'</div>' +
+		'</li>';
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 * @param {any[]} questions
+	 */
+	function areAllQuestionsAnswered(issueNumber, questions) {
+		if (!Array.isArray(questions) || !questions.length) {
+			return false;
+		}
+		const responses = getQuestionResponsesForIssue(issueNumber);
+		if (!responses || typeof responses !== 'object') {
+			return false;
+		}
+		return questions.every(question => {
+			const fallback = typeof question === 'string' ? question : String(question ?? '');
+			const canonicalQuestion = fallback.trim() || fallback;
+			if (!canonicalQuestion) {
+				return false;
+			}
+			const normalized = normalizeQuestionKey(canonicalQuestion);
+			return Boolean(responses[normalized]);
+		});
+	}
+
+	/**
+	 * @param {any} answer
+	 */
+	function formatAnswerForDisplay(answer) {
+		const fallback = typeof answer === 'string' ? answer : String(answer ?? '');
+		return escapeHtml(fallback).replace(/\n/g, '<br>');
 	}
 
 	/**
@@ -1451,7 +1656,9 @@
 		const readiness = getReadiness(data.compositeScore);
 		const updatedAt = new Date(data.createdAt).toLocaleString();
 		const issueUrl = getIssueUrl(data.issueNumber);
-		const recommendations = (data.recommendations && data.recommendations.length ? data.recommendations : ['No open questions identified.']).map(/** @param {any} item */ item => '<li>' + item + '</li>').join('');
+		const questions = Array.isArray(data.recommendations) ? data.recommendations : [];
+		const questionListHtml = renderAssessmentQuestionList(data.issueNumber, questions);
+		const allQuestionsAnswered = areAllQuestionsAnswered(data.issueNumber, questions);
 		const lines = [
 			'<div>',
 			'<h2>Assessment · #' + data.issueNumber + '</h2>',
@@ -1472,10 +1679,17 @@
 			'</div>',
 			'<div>',
 			'<h3>Pre-implementation questions</h3>',
-			'<ul class="recommendations-list">' + recommendations + '</ul>',
-			'</div>',
-			'<div class="assessment-actions">'
+			questionListHtml
 		];
+		if (questions.length && allQuestionsAnswered) {
+			lines.push('<div class="assessment-hint" role="note">'
+				+ 'All questions are answered. Re-run IssueTriage analysis to confirm readiness.'
+				+ '<button type="button" class="compact-button" data-action="rerunAssessment">Re-run assessment</button>'
+				+ '</div>');
+		}
+		lines.push('</div>',
+			'<div class="assessment-actions">'
+	);
 			lines.push('<button class="button-link" type="button" data-action="copyForAI">📋 Copy for AI</button>');
 			lines.push('<button class="button-link" type="button" data-action="sendToAI">🤖 Send to AI Assistant</button>');
 			lines.push('<button class="button-link" type="button" data-action="exportMarkdown">Export Markdown</button>');
@@ -1546,6 +1760,81 @@
 			'</li>';
 		}).join('');
 		container.innerHTML = '<div class="assessment-history"><h4>Assessment History</h4><ol class="history-timeline" role="list">' + items + '</ol></div>';
+	}
+
+	/**
+	 * @param {{ issueNumber?: number; question?: string; answer?: string; commentUrl?: string; answeredAt?: string }} message
+	 */
+	function handleQuestionAnswered(message) {
+		if (typeof selectedIssueNumber !== 'number' && typeof message.issueNumber !== 'number') {
+			return;
+		}
+		const issueNumber = typeof message.issueNumber === 'number' ? message.issueNumber : selectedIssueNumber;
+		if (typeof issueNumber !== 'number') {
+			return;
+		}
+		const question = typeof message.question === 'string' ? message.question : '';
+		const key = buildAnswerKey(issueNumber, question);
+		pendingAnswers.delete(key);
+		if (!latestState || typeof latestState !== 'object') {
+			latestState = {};
+		}
+		if (!latestState.questionResponses || typeof latestState.questionResponses !== 'object') {
+			latestState.questionResponses = {};
+		}
+		const issueKey = String(issueNumber);
+		const existing = latestState.questionResponses[issueKey] && typeof latestState.questionResponses[issueKey] === 'object'
+			? latestState.questionResponses[issueKey]
+			: {};
+		const normalized = normalizeQuestionKey(question);
+		existing[normalized] = {
+			answer: typeof message.answer === 'string' ? message.answer : '',
+			answeredAt: typeof message.answeredAt === 'string' ? message.answeredAt : new Date().toISOString(),
+			commentUrl: typeof message.commentUrl === 'string' ? message.commentUrl : undefined
+		};
+		latestState.questionResponses[issueKey] = existing;
+		if (latestAssessment && latestAssessment.issueNumber === issueNumber) {
+			renderAssessmentResult(latestAssessment);
+		}
+	}
+
+	/**
+	 * @param {{ issueNumber?: number; question?: string; error?: string }} message
+	 */
+	function handleQuestionAnswerError(message) {
+		const targetIssue = typeof message.issueNumber === 'number' ? message.issueNumber : selectedIssueNumber;
+		if (typeof targetIssue !== 'number') {
+			return;
+		}
+		const question = typeof message.question === 'string' ? message.question : '';
+		const key = buildAnswerKey(targetIssue, question);
+		pendingAnswers.delete(key);
+		const normalized = normalizeQuestionKey(question);
+		const encodedKey = encodeValue(normalized);
+		const item = assessmentPanel.querySelector('.assessment-question[data-question-key="' + encodedKey + '"]');
+		if (!(item instanceof HTMLElement)) {
+			return;
+		}
+		item.classList.add('question-error');
+		const errorMessage = typeof message.error === 'string' && message.error ? message.error : 'Unable to post answer.';
+		const errorEl = item.querySelector('.question-error-message');
+		if (errorEl) {
+			errorEl.textContent = errorMessage;
+		}
+		const textarea = item.querySelector('textarea');
+		if (textarea instanceof HTMLTextAreaElement) {
+			textarea.disabled = false;
+			try {
+				textarea.focus({ preventScroll: true });
+			} catch (error) {
+				textarea.focus();
+			}
+		}
+		const button = item.querySelector('button[data-action="submitAnswer"]');
+		if (button instanceof HTMLButtonElement) {
+			button.disabled = false;
+			button.textContent = 'Submit answer';
+		}
 	}
 
 	/**
