@@ -10,7 +10,7 @@ import { StateService } from './services/stateService';
 import { GitHubAuthService } from './services/githubAuthService';
 import { GitHubClient } from './services/githubClient';
 import type { IssueSummary } from './services/githubClient';
-import { IssueManager, FilterState } from './issueManager';
+import { IssueManager, FilterState, NewIssueDraftInput, NewIssueAnalysisResult, NewIssueSimilarityMatch } from './issueManager';
 import { AssessmentStorage } from './services/assessmentStorage';
 import { AssessmentService, AssessmentError } from './services/assessmentService';
 import { CliToolService } from './services/cliToolService';
@@ -56,12 +56,15 @@ export function activate(context: vscode.ExtensionContext) {
 		cliTools: undefined!,
 		risk: undefined!,
 		historicalData: undefined!,
+		keywordExtractor: undefined!,
+		similarity: undefined!,
 		aiIntegration: new AIIntegrationService(),
 		extensionUri: context.extensionUri
 	};
 
 	context.subscriptions.push(services.telemetry);
 	services.telemetry.trackEvent('extension.activate');
+
 	const secretSubscription = services.credentials.onDidChange(id => {
 		services.telemetry.trackEvent('credentials.changed', { scope: id });
 	});
@@ -73,41 +76,58 @@ export function activate(context: vscode.ExtensionContext) {
 	const github = new GitHubClient(auth, services.settings, services.telemetry);
 	console.log('[IssueTriage] Creating CLI tools service...');
 	const cliTools = new CliToolService(context.extensionUri.fsPath, services.settings, services.state, services.telemetry);
+
 	console.log('[IssueTriage] Creating assessment storage (SQLite)...');
 	const storageStart = Date.now();
 	const assessmentStorage = new AssessmentStorage(context.globalStorageUri.fsPath);
 	console.log(`[IssueTriage] Assessment storage created in ${Date.now() - storageStart}ms`);
+
 	console.log('[IssueTriage] Creating risk storage (SQLite)...');
 	const riskStorageStart = Date.now();
 	const riskStorage = new RiskStorage(context.globalStorageUri.fsPath);
 	console.log(`[IssueTriage] Risk storage created in ${Date.now() - riskStorageStart}ms`);
-	
-	// ML Learning services
+
 	console.log('[IssueTriage] Creating ML services...');
 	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry);
 	const similarity = new SimilarityService(riskStorage);
 	const keywordBackfill = new KeywordBackfillService(riskStorage, github, keywordExtractor, services.telemetry);
 	const historicalData = new HistoricalDataService(riskStorage, context.globalStorageUri.fsPath, services.telemetry);
-	
+
 	console.log('[IssueTriage] Creating risk intelligence service...');
 	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry, keywordExtractor);
+
 	console.log('[IssueTriage] Creating assessment service...');
 	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk);
+
 	console.log('[IssueTriage] Creating issue manager...');
-	const issueManager = new IssueManager(auth, github, services.settings, services.state, services.telemetry, risk, assessment);
+	const issueManager = new IssueManager(
+		auth,
+		github,
+		services.settings,
+		services.state,
+		services.telemetry,
+		risk,
+		assessment,
+		keywordExtractor,
+		similarity
+	);
+
 	services.auth = auth;
 	services.github = github;
 	services.issueManager = issueManager;
 	services.assessment = assessment;
 	services.cliTools = cliTools;
 	services.risk = risk;
-services.historicalData = historicalData;
+	services.historicalData = historicalData;
+	services.keywordExtractor = keywordExtractor;
+	services.similarity = similarity;
+
 	context.subscriptions.push(issueManager);
 	context.subscriptions.push(new vscode.Disposable(() => assessment.dispose()));
 	context.subscriptions.push(cliTools);
 	context.subscriptions.push(risk);
 	context.subscriptions.push(keywordBackfill);
-	
+
 	console.log('[IssueTriage] Initializing issue manager...');
 	const initStart = Date.now();
 	void issueManager.initialize().catch(error => {
@@ -117,7 +137,7 @@ services.historicalData = historicalData;
 	}).finally(() => {
 		console.log(`[IssueTriage] Issue manager initialized in ${Date.now() - initStart}ms`);
 	});
-	
+
 	console.log(`[IssueTriage] Extension activation completed in ${Date.now() - activationStart}ms`);
 
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
@@ -377,6 +397,8 @@ interface ServiceBundle {
 	cliTools: CliToolService;
 	risk: RiskIntelligenceService;
 	historicalData: HistoricalDataService;
+	keywordExtractor: KeywordExtractionService;
+	similarity: SimilarityService;
 	aiIntegration: AIIntegrationService;
 	extensionUri: vscode.Uri;
 }
@@ -1776,6 +1798,223 @@ class IssueTriagePanel {
 					font-size: 13px;
 				}
 
+				body.new-issue-open {
+					overflow: hidden;
+				}
+
+				.new-issue-overlay {
+					position: fixed;
+					inset: 0;
+					display: none;
+					align-items: flex-start;
+					justify-content: center;
+					padding: 32px 16px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 65%, rgba(0, 0, 0, 0.35));
+					backdrop-filter: blur(3px);
+					z-index: 50;
+					overflow-y: auto;
+				}
+
+				.new-issue-overlay.visible {
+					display: flex;
+				}
+
+				.new-issue-overlay[hidden] {
+					display: none !important;
+				}
+
+				.new-issue-container {
+					width: min(920px, 100%);
+					background: var(--vscode-editor-background);
+					color: inherit;
+					border-radius: 8px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+					padding: 24px;
+					display: flex;
+					flex-direction: column;
+					gap: 24px;
+				}
+
+				.new-issue-header {
+					display: flex;
+					justify-content: space-between;
+					align-items: flex-start;
+					gap: 16px;
+				}
+
+				.new-issue-header h2 {
+					margin: 0;
+					font-size: 20px;
+				}
+
+				.new-issue-subtitle {
+					margin: 4px 0 0 0;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.icon-button {
+					border: none;
+					background: transparent;
+					color: inherit;
+					font-size: 22px;
+					line-height: 1;
+					padding: 4px 8px;
+					cursor: pointer;
+				}
+
+				.icon-button:hover {
+					background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-button-background) 20%);
+				}
+
+				.icon-button:focus-visible {
+					outline: 1px solid var(--vscode-focusBorder);
+					outline-offset: 2px;
+				}
+
+				.new-issue-form {
+					display: grid;
+					gap: 16px;
+				}
+
+				.new-issue-form .form-row {
+					display: flex;
+					flex-direction: column;
+					gap: 6px;
+				}
+
+				.new-issue-form label {
+					font-weight: 600;
+					font-size: 13px;
+				}
+
+				.new-issue-form input,
+				.new-issue-form textarea {
+					font: inherit;
+					padding: 8px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: var(--vscode-editor-background);
+					color: inherit;
+				}
+
+				.new-issue-form textarea {
+					min-height: 140px;
+					resize: vertical;
+				}
+
+				.new-issue-form .input-hint {
+					margin: 0;
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.new-issue-form .form-actions {
+					display: flex;
+					flex-wrap: wrap;
+					justify-content: flex-end;
+					gap: 12px;
+				}
+
+				.new-issue-analysis {
+					border-top: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					padding-top: 16px;
+					display: grid;
+					gap: 16px;
+				}
+
+				.new-issue-status {
+					font-size: 13px;
+				}
+
+				.new-issue-status.success {
+					color: var(--vscode-testing-iconPassed, #2ea043);
+				}
+
+				.new-issue-status.error {
+					color: rgba(229, 83, 75, 0.95);
+				}
+
+				.new-issue-match-container {
+					display: grid;
+					gap: 12px;
+				}
+
+				.new-issue-match-list {
+					margin: 0;
+					padding: 0;
+					list-style: none;
+					display: grid;
+					gap: 12px;
+				}
+
+				.new-issue-match {
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+					padding: 12px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-button-background) 6%);
+					display: grid;
+					gap: 8px;
+				}
+
+				.new-issue-match-header {
+					display: flex;
+					justify-content: space-between;
+					align-items: baseline;
+					gap: 12px;
+				}
+
+				.new-issue-match button {
+					border: none;
+					background: none;
+					color: var(--vscode-textLink-foreground, var(--vscode-button-background));
+					cursor: pointer;
+					font-size: 14px;
+					text-align: left;
+					padding: 0;
+				}
+
+				.new-issue-match button:hover {
+					text-decoration: underline;
+				}
+
+				.new-issue-match-meta {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					line-height: 1.4;
+				}
+
+				.new-issue-match-confidence {
+					font-size: 12px;
+					font-weight: 600;
+					text-transform: uppercase;
+				}
+
+				.new-issue-keywords {
+					display: flex;
+					flex-wrap: wrap;
+					gap: 8px;
+				}
+
+				.new-issue-chip {
+					padding: 4px 8px;
+					border-radius: 12px;
+					background: color-mix(in srgb, var(--vscode-button-background) 25%, transparent);
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					font-size: 12px;
+				}
+
+				@media (max-width: 720px) {
+					.new-issue-container {
+						padding: 16px;
+						gap: 16px;
+					}
+
+					.new-issue-form textarea {
+						min-height: 120px;
+					}
+				}
+
 				.muted {
 					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 					font-style: italic;
@@ -1793,6 +2032,7 @@ class IssueTriagePanel {
 					</div>
 				</div>
 				<div class="toolbar">
+				<button id="openNewIssue" class="primary">New Issue</button>
 					<button id="refresh">Refresh</button>
 				</div>
 			</div>
@@ -1886,7 +2126,6 @@ class IssueTriagePanel {
 							</div>
 						</div>
 					</div>
-
 					<div class="ml-section">
 						<h3>Backfill Keywords</h3>
 						<p>Regenerate AI keywords for closed issues. Choose whether to refresh everything or only fill in gaps. This uses LLM API calls and tracks token usage.</p>
@@ -1904,7 +2143,6 @@ class IssueTriagePanel {
 						</div>
 						<div id="backfillResults" class="results-section"></div>
 					</div>
-
 					<div class="ml-section">
 						<h3>Export Training Dataset</h3>
 						<p>Validate keyword coverage and export the dataset for external model training.</p>
@@ -1915,13 +2153,67 @@ class IssueTriagePanel {
 						<div id="exportResults" class="results-section"></div>
 						<div id="downloadResults" class="results-section"></div>
 					</div>
-
 					<div class="ml-section">
 						<h3>Last Export</h3>
 						<div id="lastExport" class="info-section">
 							<p class="muted">No exports yet</p>
 						</div>
 					</div>
+				</div>
+			</div>
+			<div id="newIssueOverlay" class="new-issue-overlay" hidden>
+				<div class="new-issue-container" role="dialog" aria-modal="true" aria-labelledby="newIssueHeading">
+					<header class="new-issue-header">
+						<div>
+							<h2 id="newIssueHeading">Create New Issue</h2>
+							<p id="newIssueSubheading" class="new-issue-subtitle">Draft a summary, run similarity, and create a GitHub issue without leaving VS Code.</p>
+						</div>
+						<button id="closeNewIssueButton" class="icon-button" type="button" aria-label="Close new issue panel">×</button>
+					</header>
+					<form id="newIssueForm" class="new-issue-form">
+						<div class="form-row">
+							<label for="newIssueTitle">Title</label>
+							<input id="newIssueTitle" name="title" type="text" required maxlength="240" placeholder="Summarize the change or problem" />
+						</div>
+						<div class="form-row">
+							<label for="newIssueSummary">Summary</label>
+							<textarea id="newIssueSummary" name="summary" rows="6" required placeholder="Provide context, impact, and acceptance goals"></textarea>
+							<p class="input-hint">Similarity analysis needs a clear summary. Include impact, components, or symptoms.</p>
+						</div>
+						<div class="form-row">
+							<label for="newIssueLabels">Labels</label>
+							<input id="newIssueLabels" name="labels" type="text" placeholder="bug, security" list="labelSuggestions" autocomplete="off" />
+							<p class="input-hint">Separate multiple labels with commas. Suggestions come from the repository.</p>
+						</div>
+						<div class="form-row">
+							<label for="newIssueAssignees">Assignees</label>
+							<input id="newIssueAssignees" name="assignees" type="text" placeholder="octocat" list="assigneeSuggestions" autocomplete="off" />
+							<p class="input-hint">Optional. Separate multiple usernames with commas.</p>
+						</div>
+						<div class="form-row">
+							<label for="newIssuePriority">Priority</label>
+							<input id="newIssuePriority" name="priority" type="text" placeholder="P1, High, Medium" maxlength="24" />
+						</div>
+						<div class="form-actions">
+							<button type="button" id="analyzeNewIssueButton" class="primary">Analyze Similar Issues</button>
+							<button type="submit" id="createNewIssueButton" class="compact-button">Create Issue</button>
+							<button type="button" id="resetNewIssueButton">Reset</button>
+						</div>
+						<datalist id="labelSuggestions"></datalist>
+						<datalist id="assigneeSuggestions"></datalist>
+					</form>
+					<section id="newIssueAnalysisSection" class="new-issue-analysis" aria-live="polite">
+						<div id="newIssueStatus" class="new-issue-status muted"></div>
+						<div id="newIssueAnalysisResults" hidden>
+							<h3>Similarity Insights</h3>
+							<p id="newIssueTokenUsage" class="muted"></p>
+							<div id="newIssueMatchContainer" class="new-issue-match-container">
+								<ul id="newIssueMatchList" class="new-issue-match-list" role="list"></ul>
+							</div>
+							<div id="newIssueKeywordSummary" class="new-issue-keywords"></div>
+						</div>
+						<div id="newIssueCreateResult" class="new-issue-success" hidden></div>
+					</section>
 				</div>
 			</div>`;
 	}
@@ -2076,6 +2368,65 @@ class IssueTriagePanel {
 					visibleIssues: snapshot.issues.length
 				});
 				await this.services.issueManager.updateFilters(filters);
+				break;
+			}
+			case 'webview.newIssue.opened': {
+				const snapshot = this.services.issueManager.getSnapshot();
+				const repository = snapshot.selectedRepository?.fullName ?? 'unselected';
+				this.services.telemetry.trackEvent('issueCreator.opened', {
+					repository
+				});
+				break;
+			}
+			case 'webview.newIssue.analyze': {
+				const requestId = this.parseRequestId(message.requestId);
+				if (requestId === undefined) {
+					break;
+				}
+				const draft = this.parseNewIssueDraft(message.draft);
+				try {
+					const analysis = await this.services.issueManager.analyzeNewIssueDraft(draft);
+					await this.panel.webview.postMessage({
+						type: 'newIssue.analysis',
+						requestId,
+						analysis
+					});
+				} catch (error) {
+					const description = error instanceof Error ? error.message : String(error);
+					await this.panel.webview.postMessage({
+						type: 'newIssue.analysisError',
+						requestId,
+						error: description
+					});
+				}
+				break;
+			}
+			case 'webview.newIssue.create': {
+				const requestId = this.parseRequestId(message.requestId);
+				if (requestId === undefined) {
+					break;
+				}
+				const draft = this.parseNewIssueDraft(message.draft);
+				const analysis = this.parseNewIssueAnalysis(message.analysis);
+				try {
+					const result = await this.services.issueManager.createIssueFromDraft(draft, analysis);
+					await this.panel.webview.postMessage({
+						type: 'newIssue.created',
+						requestId,
+						issueNumber: result.issueNumber,
+						url: result.url,
+						title: result.title
+					});
+					void vscode.window.showInformationMessage(`Created GitHub issue #${result.issueNumber}.`);
+				} catch (error) {
+					const description = error instanceof Error ? error.message : String(error);
+					await this.panel.webview.postMessage({
+						type: 'newIssue.createError',
+						requestId,
+						error: description
+					});
+					void vscode.window.showErrorMessage(`Unable to create issue: ${description}`);
+				}
 				break;
 			}
 			case 'webview.signOut':
@@ -2556,6 +2907,145 @@ class IssueTriagePanel {
 				error: message
 			});
 		}
+	}
+
+	private parseRequestId(value: unknown): number | undefined {
+		if (typeof value === 'number' && Number.isFinite(value)) {
+			return Math.trunc(value);
+		}
+		if (typeof value === 'string' && value.trim().length) {
+			const parsed = Number(value);
+			if (Number.isFinite(parsed)) {
+				return Math.trunc(parsed);
+			}
+		}
+		return undefined;
+	}
+
+	private parseNewIssueDraft(raw: unknown): NewIssueDraftInput {
+		if (!raw || typeof raw !== 'object') {
+			return { title: '', summary: '' };
+		}
+		const source = raw as Record<string, unknown>;
+		const labels = this.coerceStringArray(source.labels);
+		const assignees = this.coerceStringArray(source.assignees);
+		const draft: NewIssueDraftInput = {
+			title: typeof source.title === 'string' ? source.title : '',
+			summary: typeof source.summary === 'string' ? source.summary : ''
+		};
+		if (labels.length) {
+			draft.labels = labels;
+		}
+		if (assignees.length) {
+			draft.assignees = assignees;
+		}
+		if (typeof source.priority === 'string') {
+			draft.priority = source.priority;
+		}
+		return draft;
+	}
+
+	private parseNewIssueAnalysis(raw: unknown): NewIssueAnalysisResult | undefined {
+		if (!raw || typeof raw !== 'object') {
+			return undefined;
+		}
+		const source = raw as Record<string, unknown>;
+		const keywords = this.coerceStringArray(source.keywords);
+		const tokensRaw = typeof source.tokensUsed === 'number'
+			? source.tokensUsed
+			: (typeof source.tokensUsed === 'string' ? Number(source.tokensUsed) : 0);
+		const tokensUsed = Number.isFinite(tokensRaw) ? tokensRaw : 0;
+		const matchesInput = Array.isArray(source.matches) ? source.matches : [];
+		const matches: NewIssueSimilarityMatch[] = [];
+		for (const item of matchesInput) {
+			if (!item || typeof item !== 'object') {
+				continue;
+			}
+			const candidate = item as Record<string, unknown>;
+			const issueNumber = this.parseIssueNumber(candidate.issueNumber);
+			if (issueNumber === undefined) {
+				continue;
+			}
+			const title = typeof candidate.title === 'string' ? candidate.title : `Issue #${issueNumber}`;
+			const url = typeof candidate.url === 'string' ? candidate.url : this.buildIssueUrlFromSnapshot(issueNumber);
+			const overlapRaw = typeof candidate.overlapScore === 'number'
+				? candidate.overlapScore
+				: (typeof candidate.overlapScore === 'string' ? Number(candidate.overlapScore) : 0);
+			const overlapScore = Number.isFinite(overlapRaw) ? overlapRaw : 0;
+			const sharedKeywords = this.coerceStringArray(candidate.sharedKeywords);
+			const matchKeywords = this.coerceStringArray(candidate.keywords);
+			const labels = this.coerceStringArray(candidate.labels);
+			const summary = typeof candidate.summary === 'string' ? candidate.summary : undefined;
+			const calculatedAt = typeof candidate.calculatedAt === 'string' ? candidate.calculatedAt : undefined;
+			const riskRaw = typeof candidate.riskLevel === 'string' ? candidate.riskLevel.toLowerCase() : '';
+			const riskLevel: 'low' | 'medium' | 'high' = riskRaw === 'high' || riskRaw === 'medium' ? riskRaw : 'low';
+			const riskScoreRaw = typeof candidate.riskScore === 'number'
+				? candidate.riskScore
+				: (typeof candidate.riskScore === 'string' ? Number(candidate.riskScore) : 0);
+			const riskScore = Number.isFinite(riskScoreRaw) ? riskScoreRaw : 0;
+			const confidenceRaw = typeof candidate.confidenceLevel === 'string'
+				? candidate.confidenceLevel.toLowerCase()
+				: '';
+			let confidenceLevel: 'high' | 'medium' | 'low';
+			switch (confidenceRaw) {
+				case 'high':
+					confidenceLevel = 'high';
+					break;
+				case 'medium':
+					confidenceLevel = 'medium';
+					break;
+				default:
+					confidenceLevel = overlapScore >= 0.6 ? 'high' : overlapScore >= 0.35 ? 'medium' : 'low';
+					break;
+			}
+			const confidenceLabel = typeof candidate.confidenceLabel === 'string' && candidate.confidenceLabel
+				? candidate.confidenceLabel
+				: (confidenceLevel === 'high' ? 'High confidence' : confidenceLevel === 'medium' ? 'Medium confidence' : 'Low confidence');
+			const state = typeof candidate.state === 'string' && candidate.state === 'open' ? 'open' : 'closed';
+			matches.push({
+				issueNumber,
+				title,
+				url,
+				state,
+				riskLevel,
+				riskScore,
+				overlapScore,
+				sharedKeywords,
+				keywords: matchKeywords,
+				labels,
+				summary,
+				calculatedAt,
+				confidenceLevel,
+				confidenceLabel
+			});
+		}
+		return {
+			keywords,
+			tokensUsed,
+			matches
+		};
+	}
+
+	private coerceStringArray(value: unknown): string[] {
+		if (!Array.isArray(value)) {
+			return [];
+		}
+		const result: string[] = [];
+		for (const entry of value) {
+			if (typeof entry !== 'string') {
+				continue;
+			}
+			const trimmed = entry.trim();
+			if (trimmed) {
+				result.push(trimmed);
+			}
+		}
+		return result;
+	}
+
+	private buildIssueUrlFromSnapshot(issueNumber: number): string {
+		const repository = this.services.issueManager.getSnapshot().selectedRepository?.fullName;
+		return repository ? `https://github.com/${repository}/issues/${issueNumber}` : '';
 	}
 
 	private parseIssueNumber(value: unknown): number | undefined {

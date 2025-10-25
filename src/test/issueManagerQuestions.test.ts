@@ -8,6 +8,8 @@ import type { SettingsService } from '../services/settingsService';
 import type { TelemetryService } from '../services/telemetryService';
 import type { RiskIntelligenceService } from '../services/riskIntelligenceService';
 import type { AssessmentService } from '../services/assessmentService';
+import type { KeywordExtractionService } from '../services/keywordExtractionService';
+import type { SimilarityService } from '../services/similarityService';
 
 type QuestionResponseStore = Record<string, Record<string, Record<string, unknown>>>;
 
@@ -47,6 +49,12 @@ suite('IssueManager assessment questions', () => {
 		onDidUpdate: () => new vscode.Disposable(() => undefined)
 	} as unknown as RiskIntelligenceService;
 	const assessmentStub = {} as unknown as AssessmentService;
+	const keywordExtractorStub = {
+		extractKeywords: async () => ({ keywords: [], tokensUsed: 0 })
+	} as unknown as KeywordExtractionService;
+	const similarityStub = {
+		findSimilar: async () => []
+	} as unknown as SimilarityService;
 
 	test('records responses and posts GitHub comment', async () => {
 		const globalState = new MemoryMemento();
@@ -67,7 +75,9 @@ suite('IssueManager assessment questions', () => {
 			stateService,
 			telemetryStub,
 			riskStub,
-			assessmentStub
+			assessmentStub,
+			keywordExtractorStub,
+			similarityStub
 		);
 
 		const internal = manager as unknown as {
@@ -119,7 +129,9 @@ suite('IssueManager assessment questions', () => {
 			stateService,
 			telemetryStub,
 			riskStub,
-			assessmentStub
+			assessmentStub,
+			keywordExtractorStub,
+			similarityStub
 		);
 
 		await assert.rejects(

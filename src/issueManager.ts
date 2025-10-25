@@ -16,7 +16,9 @@ import { SettingsService } from './services/settingsService';
 import { StateService } from './services/stateService';
 import { TelemetryService } from './services/telemetryService';
 import { RiskIntelligenceService, RiskUpdateEvent } from './services/riskIntelligenceService';
-import type { RiskSummary } from './types/risk';
+import { KeywordExtractionService } from './services/keywordExtractionService';
+import { SimilarityService } from './services/similarityService';
+import type { RiskLevel, RiskSummary, SimilarIssue } from './types/risk';
 
 interface GitExtensionApiWrapper {
 	getAPI(version: number): GitApi;
@@ -93,6 +95,45 @@ type IssueQuestionResponseMap = Record<string, QuestionResponse>;
 type RepositoryQuestionResponses = Record<string, IssueQuestionResponseMap>;
 type StoredQuestionResponses = Record<string, RepositoryQuestionResponses>;
 
+export interface NewIssueDraftInput {
+	title: string;
+	summary: string;
+	labels?: string[];
+	priority?: string;
+	assignees?: string[];
+}
+
+export type SimilarityConfidenceLevel = 'high' | 'medium' | 'low';
+
+export interface NewIssueSimilarityMatch {
+	issueNumber: number;
+	title: string;
+	url: string;
+	state: 'open' | 'closed';
+	riskLevel: RiskLevel;
+	riskScore: number;
+	overlapScore: number;
+	sharedKeywords: string[];
+	keywords: string[];
+	labels: string[];
+	summary?: string;
+	calculatedAt?: string;
+	confidenceLevel: SimilarityConfidenceLevel;
+	confidenceLabel: string;
+}
+
+export interface NewIssueAnalysisResult {
+	keywords: string[];
+	tokensUsed: number;
+	matches: NewIssueSimilarityMatch[];
+}
+
+export interface NewIssueCreateResult {
+	issueNumber: number;
+	url: string;
+	title: string;
+}
+
 interface IssueManagerState {
 	loading: boolean;
 	error?: string;
@@ -159,7 +200,9 @@ export class IssueManager implements vscode.Disposable {
 		private readonly stateService: StateService,
 		private readonly telemetry: TelemetryService,
 		private readonly risk: RiskIntelligenceService,
-		private readonly assessment: AssessmentService
+		private readonly assessment: AssessmentService,
+		private readonly keywordExtractor: KeywordExtractionService,
+		private readonly similarity: SimilarityService
 		) {
 		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
 		this.disposables.push(riskSubscription);
@@ -325,6 +368,139 @@ export class IssueManager implements vscode.Disposable {
 		});
 		this.emitState();
 		return { repository, question: normalizedQuestion, response, commentUrl };
+	}
+
+	public async analyzeNewIssueDraft(draft: NewIssueDraftInput): Promise<NewIssueAnalysisResult> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			throw new Error('Select a repository before creating new issues.');
+		}
+
+		const title = (draft.title ?? '').trim();
+		const summary = (draft.summary ?? '').trim();
+		if (!title) {
+			throw new Error('Provide a title before analyzing a new issue.');
+		}
+		if (!summary) {
+			throw new Error('Provide a summary before analyzing a new issue.');
+		}
+
+		const normalizedLabels = this.normalizeStringArray(draft.labels);
+		const priority = this.normalizePriority(draft.priority);
+		const similarityLimit = this.getSimilarityLimit();
+
+		try {
+			this.telemetry.trackEvent('issueCreator.analyzeRequested', {
+				repository,
+				labelCount: String(normalizedLabels.length),
+				priority: priority ?? 'unspecified'
+			}, {
+				summaryLength: summary.length
+			});
+
+			const keywordResult = await this.keywordExtractor.extractKeywords(title, summary);
+			const keywords = keywordResult.keywords ?? [];
+			const matches = await this.similarity.findSimilar(repository, keywords, undefined, similarityLimit);
+			const enrichedMatches = await this.enrichSimilarityMatches(repository, matches, similarityLimit);
+
+			this.telemetry.trackEvent('issueCreator.analyzeCompleted', {
+				repository,
+				matchCount: String(enrichedMatches.length),
+				priority: priority ?? 'unspecified'
+			}, {
+				tokensUsed: keywordResult.tokensUsed,
+				keywordCount: keywords.length
+			});
+
+			return {
+				keywords,
+				tokensUsed: keywordResult.tokensUsed,
+				matches: enrichedMatches
+			};
+		} catch (error) {
+			const description = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueCreator.analyzeFailed', {
+				repository,
+				message: description
+			});
+			throw error instanceof Error ? error : new Error(description);
+		}
+	}
+
+	public async createIssueFromDraft(draft: NewIssueDraftInput, analysis?: NewIssueAnalysisResult): Promise<NewIssueCreateResult> {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			throw new Error('Select a repository before creating new issues.');
+		}
+
+		const title = (draft.title ?? '').trim();
+		const summary = (draft.summary ?? '').trim();
+		if (!title) {
+			throw new Error('Issue title is required.');
+		}
+		if (!summary) {
+			throw new Error('Issue summary is required.');
+		}
+
+		const labels = this.normalizeStringArray(draft.labels);
+		const assignees = this.normalizeStringArray(draft.assignees);
+		const priority = this.normalizePriority(draft.priority);
+		const body = this.buildNewIssueBody({
+			summary,
+			labels,
+			assignees,
+			priority
+		}, analysis);
+
+		try {
+			this.telemetry.trackEvent('issueCreator.createIssueRequested', {
+				repository,
+				labelCount: String(labels.length),
+				assigneeCount: String(assignees.length),
+				priority: priority ?? 'unspecified',
+				matchCount: String(analysis?.matches.length ?? 0)
+			}, {
+				summaryLength: summary.length
+			});
+
+			const issueNumber = await this.github.createIssue(repository, {
+				title,
+				body,
+				labels: labels.length ? labels : undefined,
+				assignees: assignees.length ? assignees : undefined
+			});
+			const url = this.buildIssueUrl(repository, issueNumber);
+
+			this.telemetry.trackEvent('issueCreator.createIssueSuccess', {
+				repository,
+				issue: String(issueNumber),
+				priority: priority ?? 'unspecified',
+				labelCount: String(labels.length),
+				matchCount: String(analysis?.matches.length ?? 0)
+			});
+
+			void this.refreshIssues(true).catch(refreshError => {
+				const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
+				this.telemetry.trackEvent('issueCreator.refreshAfterCreateFailed', {
+					repository,
+					issue: String(issueNumber),
+					message: refreshMessage
+				});
+			});
+
+			return {
+				issueNumber,
+				url,
+				title
+			};
+		} catch (error) {
+			const description = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueCreator.createIssueFailed', {
+				repository,
+				message: description
+			});
+			throw error instanceof Error ? error : new Error(description);
+		}
 	}
 
 	public async refreshRepositories(forceRefresh = false): Promise<void> {
@@ -898,6 +1074,173 @@ export class IssueManager implements vscode.Disposable {
 			clone[issueNumber] = issueClone;
 		});
 		return clone;
+	}
+
+	private normalizeStringArray(values?: string[]): string[] {
+		if (!Array.isArray(values)) {
+			return [];
+		}
+		const seen = new Set<string>();
+		const result: string[] = [];
+		for (const value of values) {
+			if (typeof value !== 'string') {
+				continue;
+			}
+			const trimmed = value.trim();
+			if (!trimmed) {
+				continue;
+			}
+			const key = trimmed.toLowerCase();
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			result.push(trimmed);
+		}
+		return result;
+	}
+
+	private normalizePriority(priority?: string): string | undefined {
+		if (typeof priority !== 'string') {
+			return undefined;
+		}
+		const trimmed = priority.trim();
+		if (!trimmed) {
+			return undefined;
+		}
+		if (/^p[0-9]$/i.test(trimmed)) {
+			return trimmed.toUpperCase();
+		}
+		if (/^(high|medium|low)$/i.test(trimmed)) {
+			const lower = trimmed.toLowerCase();
+			return lower.charAt(0).toUpperCase() + lower.slice(1);
+		}
+		return trimmed;
+	}
+
+	private getSimilarityLimit(): number {
+		const configured = this.settings.get<number>('issueCreator.similarMatchLimit', 3);
+		if (typeof configured === 'number' && Number.isFinite(configured)) {
+			const bounded = Math.floor(configured);
+			return Math.min(Math.max(bounded, 1), 10);
+		}
+		return 3;
+	}
+
+	private evaluateSimilarityConfidence(score: number): { level: SimilarityConfidenceLevel; label: string } {
+		if (score >= 0.6) {
+			return { level: 'high', label: 'High confidence' };
+		}
+		if (score >= 0.35) {
+			return { level: 'medium', label: 'Medium confidence' };
+		}
+		return { level: 'low', label: 'Low confidence' };
+	}
+
+	private buildIssueUrl(repository: string, issueNumber: number): string {
+		return `https://github.com/${repository}/issues/${issueNumber}`;
+	}
+
+	private async enrichSimilarityMatches(repository: string, matches: SimilarIssue[], limit: number): Promise<NewIssueSimilarityMatch[]> {
+		if (!matches.length) {
+			return [];
+		}
+		const detailResults = await Promise.all(matches.map(async match => {
+			try {
+				const detail = await this.github.getIssueDetails(repository, match.issueNumber);
+				return { match, detail };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.telemetry.trackEvent('issueCreator.similarityDetailFailed', {
+					repository,
+					issue: String(match.issueNumber),
+					message
+				});
+				return { match, detail: undefined };
+			}
+		}));
+
+		const enriched: NewIssueSimilarityMatch[] = [];
+		for (const { match, detail } of detailResults) {
+			if (detail?.state === 'open') {
+				continue;
+			}
+			const confidence = this.evaluateSimilarityConfidence(match.overlapScore);
+			const title = detail?.title ?? match.issueTitle ?? `#${match.issueNumber}`;
+			const url = detail?.url ?? this.buildIssueUrl(repository, match.issueNumber);
+			const summary = match.issueSummary;
+			const labels = Array.isArray(match.issueLabels) ? this.normalizeStringArray(match.issueLabels) : [];
+			enriched.push({
+				issueNumber: match.issueNumber,
+				title,
+				url,
+				state: 'closed',
+				riskLevel: match.riskLevel,
+				riskScore: match.riskScore,
+				overlapScore: match.overlapScore,
+				sharedKeywords: match.sharedKeywords,
+				keywords: match.keywords ?? [],
+				labels,
+				summary,
+				calculatedAt: match.calculatedAt,
+				confidenceLevel: confidence.level,
+				confidenceLabel: confidence.label
+			});
+			if (enriched.length >= limit) {
+				break;
+			}
+		}
+		return enriched;
+	}
+
+	private buildNewIssueBody(
+		draft: { summary: string; labels: string[]; assignees: string[]; priority?: string },
+		analysis?: NewIssueAnalysisResult
+	): string {
+		const lines: string[] = [];
+		const summary = draft.summary.trim();
+		lines.push('## Summary');
+		lines.push('');
+		lines.push(summary.length ? summary : '_No summary provided._');
+		lines.push('');
+		lines.push('## Metadata');
+		lines.push(`- Priority: ${draft.priority ?? 'Unspecified'}`);
+		lines.push(`- Labels: ${draft.labels.length ? draft.labels.join(', ') : 'None'}`);
+		if (draft.assignees.length) {
+			lines.push(`- Assignees: ${draft.assignees.join(', ')}`);
+		}
+		lines.push('');
+		lines.push('## Similar Issues');
+		if (analysis && analysis.matches.length) {
+			analysis.matches.forEach(match => {
+				lines.push(this.formatSimilarIssueLine(match));
+				const matchSummary = match.summary?.trim();
+				if (matchSummary) {
+					lines.push(`  - ${matchSummary}`);
+				}
+			});
+		} else {
+			lines.push('- No related closed issues surfaced.');
+		}
+		if (analysis && analysis.keywords && analysis.keywords.length) {
+			const keywordLine = this.normalizeStringArray(analysis.keywords).join(', ');
+			if (keywordLine) {
+				lines.push('');
+				lines.push('## Captured Keywords');
+				lines.push(keywordLine);
+			}
+		}
+		lines.push('');
+		lines.push('_Created via IssueTriage new issue flow._');
+		return lines.join('\n');
+	}
+
+	private formatSimilarIssueLine(match: NewIssueSimilarityMatch): string {
+		const shared = match.sharedKeywords.length ? match.sharedKeywords.join(', ') : 'none';
+		const scorePercent = Math.round(match.overlapScore * 100);
+		const riskLabel = `${match.riskLevel} risk · ${Math.round(match.riskScore)}`;
+		const linkLabel = `${match.title} (#${match.issueNumber})`;
+		return `- **${match.confidenceLabel}** · [${linkLabel}](${match.url}) · score ${scorePercent}% (shared keywords: ${shared}; ${riskLabel})`;
 	}
 
 	private normalizeQuestionKey(question: string): string {

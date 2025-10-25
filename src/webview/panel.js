@@ -59,6 +59,30 @@
 	const keywordCoverageCount = /** @type {HTMLElement} */ (requireElement('keywordCoverageCount'));
 	const keywordCoveragePct = /** @type {HTMLElement} */ (requireElement('keywordCoveragePct'));
 	const lastExport = /** @type {HTMLElement} */ (requireElement('lastExport'));
+	const openNewIssueButton = /** @type {HTMLButtonElement} */ (requireElement('openNewIssue'));
+	const newIssueOverlay = /** @type {HTMLElement} */ (requireElement('newIssueOverlay'));
+	const newIssueForm = /** @type {HTMLFormElement} */ (requireElement('newIssueForm'));
+	const newIssueTitleInput = /** @type {HTMLInputElement} */ (requireElement('newIssueTitle'));
+	const newIssueSummaryInput = /** @type {HTMLTextAreaElement} */ (requireElement('newIssueSummary'));
+	const newIssueLabelsInput = /** @type {HTMLInputElement} */ (requireElement('newIssueLabels'));
+	const newIssueAssigneesInput = /** @type {HTMLInputElement} */ (requireElement('newIssueAssignees'));
+	const newIssuePriorityInput = /** @type {HTMLInputElement} */ (requireElement('newIssuePriority'));
+	const analyzeNewIssueButton = /** @type {HTMLButtonElement} */ (requireElement('analyzeNewIssueButton'));
+	const createNewIssueButton = /** @type {HTMLButtonElement} */ (requireElement('createNewIssueButton'));
+	const resetNewIssueButton = /** @type {HTMLButtonElement} */ (requireElement('resetNewIssueButton'));
+	const closeNewIssueButton = /** @type {HTMLButtonElement} */ (requireElement('closeNewIssueButton'));
+	const newIssueStatus = /** @type {HTMLElement} */ (requireElement('newIssueStatus'));
+	const newIssueAnalysisSection = /** @type {HTMLElement} */ (requireElement('newIssueAnalysisSection'));
+	const newIssueAnalysisResults = /** @type {HTMLElement} */ (requireElement('newIssueAnalysisResults'));
+	const newIssueTokenUsage = /** @type {HTMLElement} */ (requireElement('newIssueTokenUsage'));
+	const newIssueMatchContainer = /** @type {HTMLElement} */ (requireElement('newIssueMatchContainer'));
+	const newIssueMatchList = /** @type {HTMLElement} */ (requireElement('newIssueMatchList'));
+	const newIssueKeywordSummary = /** @type {HTMLElement} */ (requireElement('newIssueKeywordSummary'));
+	const newIssueCreateResult = /** @type {HTMLElement} */ (requireElement('newIssueCreateResult'));
+	const labelSuggestions = /** @type {HTMLDataListElement} */ (requireElement('labelSuggestions'));
+	const assigneeSuggestions = /** @type {HTMLDataListElement} */ (requireElement('assigneeSuggestions'));
+	const newIssueSubheading = /** @type {HTMLElement} */ (requireElement('newIssueSubheading'));
+	const defaultNewIssueSubheading = newIssueSubheading.textContent || 'Draft a summary, run similarity, and create a GitHub issue without leaving VS Code.';
 
 
 	const READINESS_OPTIONS = [
@@ -108,6 +132,13 @@
 	let searchDebounceHandle = undefined;
 	let bulkAssessmentPending = false;
 	const pendingAnswers = new Set();
+	/** @type {any | undefined} */
+	let latestNewIssueAnalysis = undefined;
+	/** @type {number | undefined} */
+	let currentAnalysisRequestId = undefined;
+	/** @type {number | undefined} */
+	let currentCreateRequestId = undefined;
+	let requestIdCounter = 1;
 
 	/**
 	 * @param {string} question
@@ -145,6 +176,482 @@
 	function buildAnswerKey(issueNumber, question) {
 		return `${issueNumber}::${normalizeQuestionKey(question)}`;
 	}
+
+	function nextRequestId() {
+		const id = requestIdCounter;
+		requestIdCounter += 1;
+		return id;
+	}
+
+	function isNewIssueOverlayVisible() {
+		return !newIssueOverlay.hasAttribute('hidden');
+	}
+
+	function focusNewIssueTitle() {
+		try {
+			newIssueTitleInput.focus({ preventScroll: true });
+		} catch (error) {
+			newIssueTitleInput.focus();
+		}
+	}
+
+	function getDefaultNewIssueStatusMessage() {
+		const repositoryName = latestState?.selectedRepository?.fullName;
+		if (repositoryName) {
+			return 'Provide a title and summary, then analyze similar issues in ' + repositoryName + '.';
+		}
+		return 'Provide a title and summary, then analyze similar issues.';
+	}
+
+	function resetNewIssueFormState(focusTitle = false) {
+		newIssueForm.reset();
+		latestNewIssueAnalysis = undefined;
+		currentAnalysisRequestId = undefined;
+		currentCreateRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		updateNewIssueStatus(getDefaultNewIssueStatusMessage(), 'info');
+		newIssueAnalysisResults.hidden = true;
+		newIssueMatchList.innerHTML = '';
+		newIssueTokenUsage.textContent = 'Tokens used: —';
+		renderNewIssueKeywordSummary([]);
+		newIssueCreateResult.hidden = true;
+		newIssueCreateResult.innerHTML = '';
+		if (focusTitle) {
+			focusNewIssueTitle();
+		}
+	}
+
+	function openNewIssueOverlay() {
+		if (isNewIssueOverlayVisible()) {
+			focusNewIssueTitle();
+			return;
+		}
+		resetNewIssueFormState(true);
+		newIssueOverlay.hidden = false;
+		newIssueOverlay.classList.add('visible');
+		document.body.classList.add('new-issue-open');
+		openNewIssueButton.setAttribute('aria-expanded', 'true');
+		vscodeApi.postMessage({ type: 'webview.newIssue.opened' });
+	}
+
+	function closeNewIssueOverlay() {
+		if (!isNewIssueOverlayVisible()) {
+			return;
+		}
+		newIssueOverlay.classList.remove('visible');
+		newIssueOverlay.hidden = true;
+		document.body.classList.remove('new-issue-open');
+		openNewIssueButton.setAttribute('aria-expanded', 'false');
+		currentAnalysisRequestId = undefined;
+		currentCreateRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+	}
+
+	/**
+	 * @param {string} message
+	 * @param {'info' | 'success' | 'error'} [tone='info']
+	 */
+	function updateNewIssueStatus(message, tone = 'info') {
+		newIssueStatus.textContent = message;
+		newIssueStatus.classList.remove('success', 'error', 'muted');
+		if (tone === 'success') {
+			newIssueStatus.classList.add('success');
+		} else if (tone === 'error') {
+			newIssueStatus.classList.add('error');
+		} else {
+			newIssueStatus.classList.add('muted');
+		}
+	}
+
+	/**
+	 * @param {string} value
+	 * @returns {string[]}
+	 */
+	function splitInputList(value) {
+		if (typeof value !== 'string' || !value.trim()) {
+			return [];
+		}
+		return value.split(/[,;]/).map(item => item.trim()).filter(Boolean);
+	}
+
+	function collectNewIssueDraft() {
+		const title = newIssueTitleInput.value.trim();
+		const summary = newIssueSummaryInput.value.trim();
+		const labels = splitInputList(newIssueLabelsInput.value);
+		const assignees = splitInputList(newIssueAssigneesInput.value);
+		const priority = newIssuePriorityInput.value.trim();
+		/** @type {{ title: string; summary: string; labels?: string[]; assignees?: string[]; priority?: string }} */
+		const draft = {
+			title,
+			summary
+		};
+		if (labels.length) {
+			draft.labels = labels;
+		}
+		if (assignees.length) {
+			draft.assignees = assignees;
+		}
+		if (priority) {
+			draft.priority = priority;
+		}
+		return draft;
+	}
+
+	function refreshNewIssueButtons() {
+		const analyzing = typeof currentAnalysisRequestId === 'number';
+		const creating = typeof currentCreateRequestId === 'number';
+		const busy = analyzing || creating;
+		analyzeNewIssueButton.disabled = busy;
+		analyzeNewIssueButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+		analyzeNewIssueButton.textContent = analyzing ? 'Analyzing…' : 'Analyze Similar Issues';
+		createNewIssueButton.disabled = busy;
+		createNewIssueButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+		createNewIssueButton.textContent = creating ? 'Creating…' : 'Create Issue';
+		resetNewIssueButton.disabled = busy;
+	}
+
+	function refreshNewIssueBusyState() {
+		const busy = typeof currentAnalysisRequestId === 'number' || typeof currentCreateRequestId === 'number';
+		newIssueAnalysisSection.setAttribute('aria-busy', busy ? 'true' : 'false');
+	}
+
+	/**
+	 * @param {string[]} keywords
+	 */
+	function renderNewIssueKeywordSummary(keywords) {
+		if (!Array.isArray(keywords) || !keywords.length) {
+			newIssueKeywordSummary.innerHTML = '<span class="muted">No keywords extracted yet.</span>';
+			return;
+		}
+		const chips = keywords.map(keyword => '<span class="new-issue-chip">' + escapeHtml(keyword) + '</span>').join('');
+		newIssueKeywordSummary.innerHTML = chips;
+	}
+
+	/**
+	 * @param {Array<any>} matches
+	 * @returns {string}
+	 */
+	function renderNewIssueMatches(matches) {
+		if (!Array.isArray(matches) || matches.length === 0) {
+			return '<li class="new-issue-match muted" role="listitem">No similar issues detected.</li>';
+		}
+		const items = matches.map(renderNewIssueMatch).filter(Boolean);
+		if (!items.length) {
+			return '<li class="new-issue-match muted" role="listitem">No similar issues detected.</li>';
+		}
+		return items.join('');
+	}
+
+	/**
+	 * @param {any} match
+	 * @returns {string}
+	 */
+	function renderNewIssueMatch(match) {
+		if (!match || typeof match !== 'object') {
+			return '';
+		}
+		const issueNumberRaw = Number(match.issueNumber);
+		const issueNumber = Number.isFinite(issueNumberRaw) ? issueNumberRaw : undefined;
+		const title = typeof match.title === 'string' && match.title.trim()
+			? match.title.trim()
+			: (issueNumber ? 'Issue #' + issueNumber : 'Related issue');
+		const labelParts = [];
+		if (issueNumber) {
+			labelParts.push('#' + issueNumber);
+		}
+		labelParts.push(title);
+		const headerLabel = labelParts.join(' · ');
+		const url = typeof match.url === 'string' ? match.url : '';
+		const confidenceLabel = typeof match.confidenceLabel === 'string' ? match.confidenceLabel : 'Similarity match';
+		const overlapRaw = typeof match.overlapScore === 'number' ? match.overlapScore : Number(match.overlapScore);
+		const scorePercent = Number.isFinite(overlapRaw) ? Math.round(Math.max(0, Math.min(1, overlapRaw)) * 100) : 0;
+		const stateLabel = match.state === 'open' ? 'Open' : 'Closed';
+		const riskLevelRaw = typeof match.riskLevel === 'string' ? match.riskLevel : 'low';
+		const riskLevel = riskLevelRaw.charAt(0).toUpperCase() + riskLevelRaw.slice(1);
+		const riskScoreRaw = typeof match.riskScore === 'number' ? match.riskScore : Number(match.riskScore);
+		const riskSegment = Number.isFinite(riskScoreRaw) && riskScoreRaw > 0
+			? riskLevel + ' risk · ' + Math.round(riskScoreRaw)
+			: riskLevel + ' risk';
+		let calculatedAt;
+		if (typeof match.calculatedAt === 'string' && match.calculatedAt) {
+			const calculatedTime = Date.parse(match.calculatedAt);
+			if (Number.isFinite(calculatedTime)) {
+				calculatedAt = new Date(calculatedTime).toLocaleString();
+			}
+		}
+		const summary = typeof match.summary === 'string' ? match.summary : '';
+		const sharedKeywords = Array.isArray(match.sharedKeywords) ? match.sharedKeywords : [];
+		const labels = Array.isArray(match.labels) ? match.labels : [];
+		const metaSegments = [
+			'Overlap ' + scorePercent + '%',
+			stateLabel,
+			riskSegment
+		];
+		if (calculatedAt) {
+			metaSegments.push('Calculated ' + calculatedAt);
+		}
+		const metaHtml = '<div class="new-issue-match-meta">' + metaSegments.map(segment => escapeHtml(segment)).join(' · ') + '</div>';
+		const summaryHtml = summary ? '<p class="new-issue-match-meta">' + escapeHtml(summary) + '</p>' : '';
+		const sharedHtml = sharedKeywords.length
+			? '<div class="new-issue-match-meta">Shared keywords: ' + escapeHtml(sharedKeywords.join(', ')) + '</div>'
+			: '';
+		const labelsHtml = labels.length
+			? '<div class="new-issue-match-meta">Labels: ' + escapeHtml(labels.join(', ')) + '</div>'
+			: '';
+		const actionHtml = url
+			? '<button type="button" data-action="openMatch" data-url="' + escapeHtml(url) + '">' + escapeHtml(headerLabel) + '</button>'
+			: '<span>' + escapeHtml(headerLabel) + '</span>';
+		return '<li class="new-issue-match" role="listitem">' +
+			'<div class="new-issue-match-header">' +
+				actionHtml +
+				'<span class="new-issue-match-confidence">' + escapeHtml(confidenceLabel) + '</span>' +
+			'</div>' +
+			metaHtml +
+			summaryHtml +
+			sharedHtml +
+			labelsHtml +
+		'</li>';
+	}
+
+	/**
+	 * @param {number | string | undefined} tokens
+	 * @returns {string}
+	 */
+	function formatNewIssueTokens(tokens) {
+		const tokensValue = typeof tokens === 'number' ? tokens : Number(tokens);
+		if (!Number.isFinite(tokensValue) || tokensValue <= 0) {
+			return 'Tokens used: —';
+		}
+		return 'Tokens used: ' + tokensValue.toLocaleString();
+	}
+
+	/**
+	 * @param {any} analysis
+	 * @returns {void}
+	 */
+	function renderNewIssueAnalysis(analysis) {
+		if (!analysis || typeof analysis !== 'object') {
+			renderNewIssueKeywordSummary([]);
+			newIssueAnalysisResults.hidden = true;
+			updateNewIssueStatus('No analysis data returned.', 'error');
+			return;
+		}
+		latestNewIssueAnalysis = analysis;
+		newIssueCreateResult.hidden = true;
+		newIssueCreateResult.innerHTML = '';
+		const matches = Array.isArray(analysis.matches) ? analysis.matches : [];
+		const keywords = Array.isArray(analysis.keywords) ? analysis.keywords : [];
+		newIssueAnalysisResults.hidden = false;
+		newIssueMatchList.innerHTML = renderNewIssueMatches(matches);
+		renderNewIssueKeywordSummary(keywords);
+		newIssueTokenUsage.textContent = formatNewIssueTokens(analysis.tokensUsed);
+		const matchCount = matches.length;
+		if (matchCount > 0) {
+			updateNewIssueStatus('Found ' + matchCount + (matchCount === 1 ? ' similar issue.' : ' similar issues.'), 'info');
+		} else {
+			updateNewIssueStatus('No closely related issues detected. Ready to create a new issue.', 'success');
+		}
+	}
+
+	/**
+	 * @param {any} [state]
+	 */
+	function refreshNewIssueDatalists(state) {
+		const source = state ?? latestState;
+		const labels = source?.issueMetadata?.labels ?? [];
+		const assignees = source?.issueMetadata?.assignees ?? [];
+		updateDatalistOptions(labelSuggestions, labels);
+		updateDatalistOptions(assigneeSuggestions, assignees);
+	}
+
+	/**
+	 * @param {HTMLDataListElement} listElement
+	 * @param {string[]} values
+	 */
+	function updateDatalistOptions(listElement, values) {
+		/** @type {string[]} */
+		const uniqueValues = [];
+		if (Array.isArray(values)) {
+			for (const value of values) {
+				if (typeof value !== 'string') {
+					continue;
+				}
+				const trimmed = value.trim();
+				if (!trimmed || uniqueValues.includes(trimmed)) {
+					continue;
+				}
+				uniqueValues.push(trimmed);
+			}
+		}
+		listElement.innerHTML = uniqueValues.map(item => '<option value="' + escapeHtml(item) + '"></option>').join('');
+	}
+
+	function startNewIssueAnalysis() {
+		if (!isNewIssueOverlayVisible()) {
+			openNewIssueOverlay();
+			return;
+		}
+		if (!newIssueForm.reportValidity()) {
+			return;
+		}
+		if (!latestState || !latestState.selectedRepository) {
+			updateNewIssueStatus('Select a repository before analyzing similar issues.', 'error');
+			return;
+		}
+		const draft = collectNewIssueDraft();
+		if (!draft.title || !draft.summary) {
+			updateNewIssueStatus('Title and summary are required for analysis.', 'error');
+			return;
+		}
+		const requestId = nextRequestId();
+		currentAnalysisRequestId = requestId;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		latestNewIssueAnalysis = undefined;
+		newIssueAnalysisResults.hidden = true;
+		newIssueMatchList.innerHTML = '';
+		newIssueTokenUsage.textContent = 'Tokens used: —';
+		renderNewIssueKeywordSummary([]);
+		newIssueCreateResult.hidden = true;
+		newIssueCreateResult.innerHTML = '';
+		updateNewIssueStatus('Analyzing similar issues…', 'info');
+		vscodeApi.postMessage({
+			type: 'webview.newIssue.analyze',
+			requestId,
+			draft
+		});
+	}
+
+	function startCreateNewIssue() {
+		if (!newIssueForm.reportValidity()) {
+			return;
+		}
+		if (!latestState || !latestState.selectedRepository) {
+			updateNewIssueStatus('Select a repository before creating an issue.', 'error');
+			return;
+		}
+		const draft = collectNewIssueDraft();
+		if (!draft.title || !draft.summary) {
+			updateNewIssueStatus('Title and summary are required before creating an issue.', 'error');
+			return;
+		}
+		const requestId = nextRequestId();
+		currentCreateRequestId = requestId;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		newIssueCreateResult.hidden = true;
+		newIssueCreateResult.innerHTML = '';
+		updateNewIssueStatus('Creating GitHub issue…', 'info');
+		/** @type {{ type: string; requestId: number; draft: { title: string; summary: string; labels?: string[]; assignees?: string[]; priority?: string }; analysis?: any }} */
+		const payload = {
+			type: 'webview.newIssue.create',
+			requestId,
+			draft
+		};
+		if (latestNewIssueAnalysis && typeof latestNewIssueAnalysis === 'object') {
+			payload.analysis = latestNewIssueAnalysis;
+		}
+		vscodeApi.postMessage(payload);
+	}
+
+	/**
+	 * @param {{ requestId?: number | string; analysis?: any }} message
+	 */
+	function handleNewIssueAnalysisMessage(message) {
+		const requestId = Number(message.requestId);
+		if (!Number.isFinite(requestId) || requestId !== currentAnalysisRequestId) {
+			return;
+		}
+		currentAnalysisRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		renderNewIssueAnalysis(message.analysis);
+	}
+
+	/**
+	 * @param {{ requestId?: number | string; error?: string }} message
+	 */
+	function handleNewIssueAnalysisError(message) {
+		const requestId = Number(message.requestId);
+		if (!Number.isFinite(requestId) || requestId !== currentAnalysisRequestId) {
+			return;
+		}
+		currentAnalysisRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		const description = typeof message.error === 'string' && message.error
+			? message.error
+			: 'Unable to analyze similar issues.';
+		updateNewIssueStatus(description, 'error');
+		newIssueAnalysisResults.hidden = true;
+		newIssueMatchList.innerHTML = '';
+		newIssueTokenUsage.textContent = 'Tokens used: —';
+		renderNewIssueKeywordSummary([]);
+	}
+
+	/**
+	 * @param {{ requestId?: number | string; issueNumber?: number | string; title?: string; url?: string }} message
+	 */
+	function handleNewIssueCreated(message) {
+		const requestId = Number(message.requestId);
+		if (!Number.isFinite(requestId) || requestId !== currentCreateRequestId) {
+			return;
+		}
+		currentCreateRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		newIssueForm.reset();
+		latestNewIssueAnalysis = undefined;
+		newIssueAnalysisResults.hidden = true;
+		newIssueMatchList.innerHTML = '';
+		newIssueTokenUsage.textContent = 'Tokens used: —';
+		renderNewIssueKeywordSummary([]);
+		const issueNumber = Number(message.issueNumber);
+		const issueLabel = Number.isFinite(issueNumber) && issueNumber > 0 ? '#' + issueNumber : 'Issue';
+		const title = typeof message.title === 'string' ? message.title : '';
+		updateNewIssueStatus('Created ' + issueLabel + '.', 'success');
+		const url = typeof message.url === 'string' ? message.url : '';
+		const openButton = url
+			? '<button type="button" class="button-link" data-action="openCreatedIssue" data-url="' + escapeHtml(url) + '">Open in GitHub</button>'
+			: '';
+		newIssueCreateResult.hidden = false;
+		newIssueCreateResult.innerHTML =
+			'<div class="success-message">' +
+				'<p><strong>' + escapeHtml(issueLabel) + '</strong> ' + escapeHtml(title) + '</p>' +
+				(openButton ? '<p>' + openButton + '</p>' : '') +
+			'</div>';
+	}
+
+	/**
+	 * @param {{ requestId?: number | string; error?: string }} message
+	 */
+	function handleNewIssueCreateError(message) {
+		const requestId = Number(message.requestId);
+		if (!Number.isFinite(requestId) || requestId !== currentCreateRequestId) {
+			return;
+		}
+		currentCreateRequestId = undefined;
+		refreshNewIssueButtons();
+		refreshNewIssueBusyState();
+		const description = typeof message.error === 'string' && message.error
+			? message.error
+			: 'Unable to create the issue.';
+		updateNewIssueStatus(description, 'error');
+		newIssueCreateResult.hidden = false;
+		newIssueCreateResult.innerHTML =
+			'<div class="error-message">' +
+				'<p><strong>Issue creation failed</strong></p>' +
+				'<p>' + escapeHtml(description) + '</p>' +
+			'</div>';
+	}
+
+	refreshNewIssueButtons();
+	refreshNewIssueBusyState();
+	renderNewIssueKeywordSummary([]);
+	updateNewIssueStatus(getDefaultNewIssueStatusMessage(), 'info');
+	openNewIssueButton.setAttribute('aria-expanded', 'false');
 
 	window.addEventListener('message', event => {
 		const message = event.data;
@@ -215,6 +722,18 @@
 				break;
 			case 'ml.downloadComplete':
 				handleDownloadComplete(message);
+				break;
+			case 'newIssue.analysis':
+				handleNewIssueAnalysisMessage(message);
+				break;
+			case 'newIssue.analysisError':
+				handleNewIssueAnalysisError(message);
+				break;
+			case 'newIssue.created':
+				handleNewIssueCreated(message);
+				break;
+			case 'newIssue.createError':
+				handleNewIssueCreateError(message);
 				break;
 			default:
 				break;
@@ -349,6 +868,87 @@
 		bulkAssessmentPending = true;
 		refreshRunAnalysisControls();
 		vscodeApi.postMessage({ type: 'webview.runBulkAssessment', issueNumbers });
+	});
+
+	openNewIssueButton.addEventListener('click', event => {
+		event.preventDefault();
+		if (openNewIssueButton.disabled) {
+			return;
+		}
+		openNewIssueOverlay();
+	});
+
+	closeNewIssueButton.addEventListener('click', event => {
+		event.preventDefault();
+		closeNewIssueOverlay();
+	});
+
+	newIssueOverlay.addEventListener('click', event => {
+		if (event.target === newIssueOverlay) {
+			closeNewIssueOverlay();
+		}
+	});
+
+	resetNewIssueButton.addEventListener('click', event => {
+		event.preventDefault();
+		if (resetNewIssueButton.disabled) {
+			return;
+		}
+		resetNewIssueFormState(true);
+	});
+
+	analyzeNewIssueButton.addEventListener('click', event => {
+		event.preventDefault();
+		if (analyzeNewIssueButton.disabled) {
+			return;
+		}
+		startNewIssueAnalysis();
+	});
+
+	newIssueForm.addEventListener('submit', event => {
+		event.preventDefault();
+		if (createNewIssueButton.disabled) {
+			return;
+		}
+		startCreateNewIssue();
+	});
+
+	newIssueMatchList.addEventListener('click', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const button = event.target.closest('button[data-action="openMatch"]');
+		if (!(button instanceof HTMLButtonElement)) {
+			return;
+		}
+		const url = button.getAttribute('data-url');
+		if (url) {
+			vscodeApi.postMessage({ type: 'webview.openIssue', url });
+		}
+	});
+
+	newIssueCreateResult.addEventListener('click', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const button = event.target.closest('button[data-action="openCreatedIssue"]');
+		if (!(button instanceof HTMLButtonElement)) {
+			return;
+		}
+		const url = button.getAttribute('data-url');
+		if (url) {
+			vscodeApi.postMessage({ type: 'webview.openIssue', url });
+		}
+	});
+
+	window.addEventListener('keydown', event => {
+		if (event.defaultPrevented) {
+			return;
+		}
+		if (event.key === 'Escape' && isNewIssueOverlayVisible()) {
+			event.preventDefault();
+			closeNewIssueOverlay();
+		}
 	});
 
 	function updateStateTabs() {
@@ -787,6 +1387,24 @@
 		connectButton.disabled = loading;
 		connectButton.textContent = session ? 'Sign Out' : 'Connect';
 		refreshButton.disabled = loading || !selectedRepository;
+		openNewIssueButton.disabled = loading || !selectedRepository;
+		openNewIssueButton.setAttribute('aria-disabled', openNewIssueButton.disabled ? 'true' : 'false');
+		const overlayVisible = isNewIssueOverlayVisible();
+		openNewIssueButton.setAttribute('aria-expanded', overlayVisible ? 'true' : 'false');
+		if (!selectedRepository && overlayVisible) {
+			closeNewIssueOverlay();
+		}
+		if (selectedRepository && selectedRepository.fullName) {
+			openNewIssueButton.title = 'Create a new issue in ' + selectedRepository.fullName;
+			newIssueSubheading.textContent = 'Draft a summary, run similarity, and create a GitHub issue in ' + selectedRepository.fullName + '.';
+		} else {
+			openNewIssueButton.title = 'Select a repository to create a new issue.';
+			newIssueSubheading.textContent = defaultNewIssueSubheading;
+		}
+		if (overlayVisible && !currentAnalysisRequestId && !currentCreateRequestId && !latestNewIssueAnalysis && newIssueCreateResult.hidden) {
+			updateNewIssueStatus(getDefaultNewIssueStatusMessage(), 'info');
+		}
+		refreshNewIssueDatalists(state);
 
 		if (session) {
 			accountLabel.textContent = 'Signed in as ' + session.login;

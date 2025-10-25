@@ -75,6 +75,9 @@ export interface SimilarIssue {
 	overlapScore: number;
 	sharedKeywords: string[];
 	calculatedAt: string;
+	issueTitle?: string;
+	issueSummary?: string;
+	issueLabels?: string[];
 }
 
 /**

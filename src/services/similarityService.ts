@@ -38,6 +38,9 @@ export class SimilarityService {
 					riskLevel: profile.riskLevel,
 					riskScore: profile.riskScore,
 					keywords: profileKeywords,
+					issueTitle: profile.issueTitle,
+					issueSummary: profile.issueSummary,
+					issueLabels: profile.issueLabels ?? [],
 					overlapScore: score,
 					sharedKeywords: overlap,
 					calculatedAt: profile.calculatedAt
