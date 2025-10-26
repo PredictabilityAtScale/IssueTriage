@@ -17,6 +17,7 @@ import { StateService } from './services/stateService';
 import { TelemetryService } from './services/telemetryService';
 import { RiskIntelligenceService, RiskUpdateEvent } from './services/riskIntelligenceService';
 import { KeywordExtractionService } from './services/keywordExtractionService';
+import { ensureKeywordCoverage } from './services/keywordUtils';
 import { SimilarityService } from './services/similarityService';
 import type { RiskLevel, RiskSummary, SimilarIssue } from './types/risk';
 
@@ -390,6 +391,12 @@ export class IssueManager implements vscode.Disposable {
 		const similarityLimit = this.getSimilarityLimit();
 
 		try {
+			const keywordContext = {
+				issueTitle: title,
+				issueBody: summary,
+				labels: normalizedLabels,
+				repository
+			};
 			this.telemetry.trackEvent('issueCreator.analyzeRequested', {
 				repository,
 				labelCount: String(normalizedLabels.length),
@@ -399,7 +406,7 @@ export class IssueManager implements vscode.Disposable {
 			});
 
 			const keywordResult = await this.keywordExtractor.extractKeywords(title, summary);
-			const keywords = keywordResult.keywords ?? [];
+			const keywords = ensureKeywordCoverage(keywordResult.keywords, keywordContext);
 			const matches = await this.similarity.findSimilar(repository, keywords, undefined, similarityLimit);
 			const enrichedMatches = await this.enrichSimilarityMatches(repository, matches, similarityLimit);
 
