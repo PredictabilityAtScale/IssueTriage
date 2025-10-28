@@ -198,7 +198,7 @@ suite('AssessmentService', () => {
 		const record = await service.assessIssue('owner/repo', 42);
 
 		assert.ok(storage.saved, 'assessment should be persisted');
-		assert.strictEqual(storage.saved?.compositeScore, 64, 'composite score should reflect high-risk modifier (80 * 0.8)');
+		assert.strictEqual(storage.saved?.compositeScore, 48.8, 'composite score should reflect weighted readiness with high-risk modifier');
 		assert.strictEqual(storage.saved?.complexityScore, 56, 'complexity score should be adjusted (70 * 0.8)');
 		assert.strictEqual(storage.saved?.requirementsScore, 90);
 		assert.strictEqual(record.commentId, 101);

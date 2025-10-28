@@ -384,14 +384,24 @@ export class AssessmentService {
 			.map((item: string) => item.trim())
 			.filter((item: string) => item.length > 0);
 
+		const sanitizedDimensions = {
+			requirements: this.sanitizeScore(scores.requirements),
+			complexity: this.sanitizeScore(scores.complexity),
+			security: this.sanitizeScore(scores.security),
+			business: this.sanitizeScore(scores.business)
+		};
+		const hasDimensionData = Object.values(sanitizedDimensions).some(value => value > 0);
+		const fallbackComposite = this.sanitizeScore(scores.composite);
+		const computedComposite = hasDimensionData
+			? this.calculateCompositeFromDimensions(sanitizedDimensions)
+			: undefined;
+		const composite = computedComposite ?? fallbackComposite;
+
 		return {
 			summary: String(parsed.summary ?? '').trim(),
 			scores: {
-				composite: this.sanitizeScore(scores.composite),
-				requirements: this.sanitizeScore(scores.requirements),
-				complexity: this.sanitizeScore(scores.complexity),
-				security: this.sanitizeScore(scores.security),
-				business: this.sanitizeScore(scores.business)
+				composite,
+				...sanitizedDimensions
 			},
 			recommendations
 		};
@@ -404,6 +414,19 @@ export class AssessmentService {
 			return jsonBlock;
 		}
 		return trimmed;
+	}
+
+	private calculateCompositeFromDimensions(dimensions: { requirements: number; complexity: number; security: number; business: number }): number {
+		const clamp = (value: number) => Math.min(1, Math.max(0, value));
+		const normalizedRequirements = clamp(dimensions.requirements / 100);
+		const normalizedComplexity = clamp((100 - dimensions.complexity) / 100);
+		const normalizedSecurity = clamp(dimensions.security / 100);
+		const normalizedBusiness = clamp(dimensions.business / 100);
+		const weighted = (normalizedRequirements * 0.4)
+			+ (normalizedComplexity * 0.35)
+			+ (normalizedSecurity * 0.15)
+			+ (normalizedBusiness * 0.1);
+		return Number((weighted * 100).toFixed(1));
 	}
 
 	private sanitizeScore(value: unknown): number {
