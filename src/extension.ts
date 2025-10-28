@@ -829,7 +829,7 @@ class IssueTriagePanel {
 			.overview-grid {
 				display: grid;
 				gap: 12px;
-				grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+				grid-template-columns: repeat(auto-fit, minmax(clamp(100px, 22vw, 160px), 1fr));
 			}
 
 			.overview-card {
@@ -1283,7 +1283,7 @@ class IssueTriagePanel {
 
 				.score-grid {
 					display: grid;
-					grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+					grid-template-columns: repeat(auto-fit, minmax(clamp(88px, 18vw, 132px), 1fr));
 					gap: 12px;
 					margin: 16px 0;
 				}
@@ -2622,11 +2622,7 @@ class IssueTriagePanel {
 					const issueDetails = await this.services.github.getIssueDetails(repository, issueNumber);
 					const assessment = await this.services.assessment.getLatestAssessment(repository, issueNumber);
 					const context = this.services.aiIntegration.formatIssueContext(
-						repository,
-						issueDetails.number,
-						issueDetails.title,
-						issueDetails.body || '',
-						issueDetails.url,
+						issueDetails,
 						assessment ? {
 							compositeScore: assessment.compositeScore,
 							recommendations: assessment.recommendations,
@@ -2674,11 +2670,7 @@ class IssueTriagePanel {
 					const issueDetails = await this.services.github.getIssueDetails(repository, issueNumber);
 					const assessment = await this.services.assessment.getLatestAssessment(repository, issueNumber);
 					const context = this.services.aiIntegration.formatIssueContext(
-						repository,
-						issueDetails.number,
-						issueDetails.title,
-						issueDetails.body || '',
-						issueDetails.url,
+						issueDetails,
 						assessment ? {
 							compositeScore: assessment.compositeScore,
 							recommendations: assessment.recommendations,

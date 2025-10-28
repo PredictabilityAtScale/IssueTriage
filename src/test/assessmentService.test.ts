@@ -164,7 +164,8 @@ suite('AssessmentService', () => {
 			createdAt: new Date().toISOString(),
 			body: 'Investigate cache invalidation behaviour',
 			author: 'octocat',
-			state: 'open'
+			state: 'open',
+			comments: []
 		};
 		const cli = new MockCliToolService();
 		const risk = new MockRiskService();
@@ -205,5 +206,83 @@ suite('AssessmentService', () => {
 		assert.ok(github.commentBodies[0]?.includes('<!-- IssueTriage Assessment -->'));
 		const riskAdjustedEvent = telemetry.events.find(event => event.name === 'assessment.riskAdjusted');
 		assert.ok(riskAdjustedEvent, 'risk adjustment telemetry should be emitted');
+	});
+
+	test('includes conversation history when building assessment payload', async () => {
+		const storage = new MockAssessmentStorage();
+		const settings = new MockSettingsService({
+			'assessment.publishComments': false,
+			'assessment.preferredModel': 'openai/gpt-5-mini'
+		}, {
+			ISSUETRIAGE_OPENROUTER_API_KEY: 'comment-key'
+		});
+		const telemetry = new MockTelemetryService();
+		const github = new MockGitHubClient();
+		const createdAt = '2024-01-01T12:00:00Z';
+		github.issue = {
+			repository: 'owner/repo',
+			number: 99,
+			title: 'Clarify integration approach',
+			url: 'https://github.com/owner/repo/issues/99',
+			labels: [],
+			assignees: [],
+			milestone: undefined,
+			updatedAt: createdAt,
+			createdAt,
+			body: 'Initial description with open questions.',
+			author: 'requester',
+			state: 'open',
+			comments: [
+				{
+					id: 501,
+					body: 'Answering the deployment question with specific environments.',
+					author: 'maintainer',
+					createdAt: '2024-01-02T09:30:00Z',
+					url: 'https://github.com/owner/repo/issues/99#issuecomment-501'
+				},
+				{
+					id: 502,
+					body: 'Noted; will follow the proposed rollout schedule.',
+					author: 'requester',
+					createdAt: '2024-01-03T10:00:00Z'
+				}
+			]
+		};
+		const cli = new MockCliToolService();
+		const risk = new MockRiskService();
+		const mockResponse = {
+			choices: [
+				{
+					message: {
+						content: '{"summary":"Looks good","scores":{"composite":70,"requirements":75,"complexity":60,"security":65,"business":55},"recommendations":[]}'
+					}
+				}
+			]
+		};
+		let capturedBody: unknown;
+		globalThis.fetch = (async (_input, init) => {
+			capturedBody = init;
+			return {
+				ok: true,
+				json: async () => mockResponse,
+				text: async () => JSON.stringify(mockResponse)
+			} as Response;
+		}) as FetchLike;
+
+		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService);
+		await service.assessIssue('owner/repo', 99);
+
+		const initLike = capturedBody as { body?: unknown } | undefined;
+		const bodyString = typeof initLike?.body === 'string' ? initLike.body : undefined;
+		assert.ok(bodyString, 'request body should be captured');
+		const parsed = JSON.parse(bodyString);
+		const userMessage = parsed?.messages?.find((message: any) => message?.role === 'user');
+		assert.ok(userMessage, 'should include user message payload');
+		const content = String(userMessage.content);
+		assert.ok(content.includes('## Conversation History'));
+		assert.ok(content.includes('Comment 1 by maintainer'));
+		assert.ok(content.includes('deployment question'));
+		assert.ok(content.includes('Comment 2 by requester'));
+		assert.ok(content.includes('rollout schedule'));
 	});
 });

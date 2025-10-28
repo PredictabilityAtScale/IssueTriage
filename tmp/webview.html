@@ -135,11 +135,10 @@
 					margin-bottom: 8px;
 				}
 
-				.issue-card-title {
-					display: flex;
-					align-items: center;
-					gap: 8px;
-					min-width: 0;
+				.overview-grid {
+					display: grid;
+					gap: 12px;
+					grid-template-columns: repeat(auto-fit, minmax(clamp(100px, 22vw, 160px), 1fr));
 				}
 
 				.issue-card.selected {
@@ -273,7 +272,7 @@
 
 				.score-grid {
 					display: grid;
-					grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+					grid-template-columns: repeat(auto-fit, minmax(clamp(88px, 18vw, 132px), 1fr));
 					gap: 12px;
 					margin: 16px 0;
 				}
@@ -292,21 +291,6 @@
 					letter-spacing: 0.05em;
 					margin-bottom: 4px;
 				}
-
-				.score-card span {
-					font-size: 20px;
-					font-weight: 600;
-				}
-
-				.recommendations-list {
-					margin: 0 0 0 16px;
-					padding: 0;
-				}
-
-				.recommendations-list li {
-					margin-bottom: 6px;
-				}
-
 				.assessment-actions {
 					display: flex;
 					gap: 8px;

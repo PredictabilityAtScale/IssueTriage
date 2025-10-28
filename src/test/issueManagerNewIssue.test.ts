@@ -124,7 +124,8 @@ suite('IssueManager new issue workflow', () => {
 					createdAt: new Date().toISOString(),
 					body: '',
 					author: 'triager',
-					state: issueNumber === 101 ? 'closed' : 'open'
+					state: issueNumber === 101 ? 'closed' : 'open',
+					comments: []
 				};
 			}
 		} as unknown as GitHubClient;
@@ -216,7 +217,8 @@ suite('IssueManager new issue workflow', () => {
 				createdAt: new Date().toISOString(),
 				body: '',
 				author: 'triager',
-				state: 'closed'
+				state: 'closed',
+				comments: []
 			})
 		} as unknown as GitHubClient;
 

@@ -1,24 +1,10 @@
 import * as assert from 'assert';
 import { RiskIntelligenceService } from '../services/riskIntelligenceService';
 import type { RiskProfileStore } from '../services/riskStorage';
-import type { IssueRiskSnapshot, PullRequestRiskData, CommitRiskData, IssueSummary } from '../services/githubClient';
+import type { IssueRiskSnapshot, PullRequestRiskData, CommitRiskData, IssueSummary, IssueDetail } from '../services/githubClient';
 import type { RiskProfile } from '../types/risk';
 
 type SettingsRecord = Record<string, unknown>;
-type IssueDetail = {
-	number: number;
-	title: string;
-	body: string;
-	url: string;
-	repository: string;
-	author: string;
-	labels: string[];
-	assignees: string[];
-	milestone?: string;
-	updatedAt: string;
-	createdAt?: string;
-	state: 'open' | 'closed';
-};
 
 class MemoryRiskStore implements RiskProfileStore {
 	private readonly store = new Map<string, RiskProfile>();
@@ -129,7 +115,8 @@ class FakeGitHubClient {
 			milestone: issue.milestone,
 			updatedAt: issue.updatedAt,
 			createdAt: issue.updatedAt,
-			state: issue.state
+			state: issue.state,
+			comments: []
 		};
 	}
 }

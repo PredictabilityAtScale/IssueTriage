@@ -46,7 +46,6 @@ export class AssessmentService {
 	public dispose(): void {
 		void this.storage.dispose();
 	}
-
 	public async assessIssue(repository: string, issueNumber: number): Promise<AssessmentRecord> {
 		const apiKey = this.settings.getWithEnvFallback('assessment.apiKey', 'ISSUETRIAGE_OPENROUTER_API_KEY');
 		if (!apiKey) {
@@ -313,6 +312,21 @@ export class AssessmentService {
 		const cliContext = this.cliTools.getPromptContext();
 		if (cliContext) {
 			details.push('', 'CLI tool context captured by IssueTriage:', cliContext.trim());
+		}
+
+		if (issue.comments.length) {
+			details.push('', '## Conversation History');
+			issue.comments.forEach((comment, index) => {
+				const timestamp = comment.createdAt ? new Date(comment.createdAt).toISOString() : 'timestamp unknown';
+				const author = comment.author || 'unknown';
+				const linkSuffix = comment.url ? ` · ${comment.url}` : '';
+				details.push(`Comment ${index + 1} by ${author} on ${timestamp}${linkSuffix}`);
+				const normalizedBody = (comment.body ?? '').replace(/\r\n/g, '\n');
+				details.push(normalizedBody.trim().length ? normalizedBody : '(empty comment)');
+				if (index < issue.comments.length - 1) {
+					details.push('');
+				}
+			});
 		}
 
 		return `${details.join('\n')}\n\nReturn a JSON object with the following shape: {

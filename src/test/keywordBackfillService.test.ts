@@ -90,8 +90,16 @@ class StubGitHubClient {
 			number: 1,
 			title: 'Closed issue',
 			body: 'Details',
+			url: 'https://github.com/owner/repo/issues/1',
+			repository: 'owner/repo',
+			author: 'octocat',
+			labels: [],
+			assignees: [],
+			milestone: undefined,
+			updatedAt: new Date().toISOString(),
+			createdAt: new Date().toISOString(),
 			state: 'closed' as const,
-			labels: []
+			comments: []
 		};
 	}
 }

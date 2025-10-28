@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { IssueDetail } from './githubClient';
 
 export interface AIAssistant {
 	id: string;
@@ -101,11 +102,7 @@ export class AIIntegrationService {
 	}
 
 	public formatIssueContext(
-		repository: string,
-		issueNumber: number,
-		title: string,
-		body: string,
-		url: string,
+		issue: IssueDetail,
 		assessment?: {
 			compositeScore: number;
 			recommendations: string[];
@@ -115,10 +112,10 @@ export class AIIntegrationService {
 		const lines = [
 			'# GitHub Issue Context',
 			'',
-			`**Repository:** ${repository}`,
-			`**Issue:** #${issueNumber}`,
-			`**Title:** ${title}`,
-			`**URL:** ${url}`,
+			`**Repository:** ${issue.repository}`,
+			`**Issue:** #${issue.number}`,
+			`**Title:** ${issue.title}`,
+			`**URL:** ${issue.url}`,
 			''
 		];
 
@@ -144,12 +141,28 @@ export class AIIntegrationService {
 		lines.push(
 			'## Issue Description',
 			'',
-			body || '(No description provided)',
+			issue.body || '(No description provided)',
 			'',
 			'---',
 			'',
 			'Please implement this GitHub issue. Consider the assessment recommendations if provided.'
 		);
+
+		if (issue.comments.length) {
+			lines.push('', '## Conversation History', '');
+			issue.comments.forEach((comment, index) => {
+				const author = comment.author || 'unknown';
+				const timestamp = comment.createdAt ? new Date(comment.createdAt).toISOString() : 'timestamp unknown';
+				let header = `Comment ${index + 1} · ${author} · ${timestamp}`;
+				if (comment.url) {
+					header = `${header} (${comment.url})`;
+				}
+				lines.push(header);
+				const normalizedBody = (comment.body ?? '').replace(/\r\n/g, '\n').trim();
+				lines.push(normalizedBody.length ? normalizedBody : '(empty comment)');
+				lines.push('');
+			});
+		}
 
 		return lines.join('\n');
 	}

@@ -39,6 +39,9 @@ type CommentResponse = {
 	id: number;
 	body: string;
 	user?: { login?: string | null } | null;
+	created_at?: string;
+	updated_at?: string;
+	html_url?: string;
 };
 
 type IssueEventResponse = {
@@ -108,11 +111,21 @@ export interface IssueSummary {
 	state: 'open' | 'closed';
 }
 
+export interface IssueComment {
+	id: number;
+	body: string;
+	author: string;
+	createdAt?: string;
+	updatedAt?: string;
+	url?: string;
+}
+
 export interface IssueDetail extends IssueSummary {
 	repository: string;
 	body: string;
 	author: string;
 	createdAt?: string;
+	comments: IssueComment[];
 }
 
 export interface PullRequestRiskData {
@@ -318,12 +331,31 @@ export class GitHubClient {
 		const client = await this.createClient(token);
 		const { owner, repo } = this.parseRepository(fullName);
 		try {
-			const response = await client.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
-				owner,
-				repo,
-				issue_number: issueNumber
-			});
-			const data = response.data as IssueDetailResponse;
+			const [issueResponse, commentsResponse] = await Promise.all([
+				client.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
+					owner,
+					repo,
+					issue_number: issueNumber
+				}),
+				client.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+					owner,
+					repo,
+					issue_number: issueNumber,
+					per_page: 100
+				})
+			]);
+			const data = issueResponse.data as IssueDetailResponse;
+			const issueComments = Array.isArray(commentsResponse)
+				? (commentsResponse as CommentResponse[])
+				: [];
+			const comments: IssueComment[] = issueComments.map(comment => ({
+				id: comment.id,
+				body: typeof comment.body === 'string' ? comment.body : '',
+				author: comment.user?.login ?? 'unknown',
+				createdAt: comment.created_at ?? undefined,
+				updatedAt: comment.updated_at ?? undefined,
+				url: comment.html_url ?? undefined
+			}));
 			return {
 				repository: fullName,
 				number: data.number,
@@ -336,7 +368,8 @@ export class GitHubClient {
 				createdAt: data.created_at,
 				body: (data.body ?? '').trim(),
 				author: data.user?.login ?? 'unknown',
-				state: (data.state as 'open' | 'closed') || 'open'
+				state: (data.state as 'open' | 'closed') || 'open',
+				comments
 			};
 		} catch (error) {
 			this.handleError('github.issue.detail.failed', error);
