@@ -11,12 +11,16 @@
     "Other"
   ],
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "issuetriage.openPanel",
         "title": "Issue Triage: Open Panel",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "issuetriage.connectRepository",
@@ -24,14 +28,21 @@
         "category": "Issue Triage"
       },
       {
+        "command": "issuetriage.changeRepository",
+        "title": "Issue Triage: Change Repository",
+        "category": "Issue Triage"
+      },
+      {
         "command": "issuetriage.refreshIssues",
         "title": "Issue Triage: Refresh Issues",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(refresh)"
       },
       {
         "command": "issuetriage.assessIssue",
         "title": "Issue Triage: Assess Selected Issue",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(pulse)"
       },
       {
         "command": "issuetriage.runContextTool",
@@ -52,8 +63,68 @@
         "command": "issuetriage.signOut",
         "title": "Issue Triage: Sign Out",
         "category": "Issue Triage"
+      },
+      {
+        "command": "issuetriage.sendToAutomation",
+        "title": "Issue Triage: Send to Automation",
+        "category": "Issue Triage",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "issuetriage.filterByReadiness",
+        "title": "Issue Triage: Toggle Readiness Filter",
+        "category": "Issue Triage",
+        "icon": "$(filter)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "issuetriage",
+          "title": "Issue Triage",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "issuetriage": [
+        {
+          "id": "issuetriage.issuesView",
+          "name": "Issues",
+          "contextualTitle": "Issue Triage"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "issuetriage.openPanel",
+          "when": "view == issuetriage.issuesView",
+          "group": "navigation@1",
+          "icon": "$(open-preview)"
+        },
+        {
+          "command": "issuetriage.refreshIssues",
+          "when": "view == issuetriage.issuesView",
+          "group": "navigation@2",
+          "icon": "$(refresh)"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "issuetriage.assessIssue",
+          "when": "view == issuetriage.issuesView && viewItem == issueNotAssessed",
+          "group": "inline@1",
+          "icon": "$(pulse)"
+        },
+        {
+          "command": "issuetriage.sendToAutomation",
+          "when": "view == issuetriage.issuesView && viewItem == issueReady",
+          "group": "inline@1",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
     "configuration": {
       "title": "IssueTriage",
       "properties": {

@@ -6,7 +6,13 @@ As of the Phase 1 build, the extension connects directly to GitHub, surfaces r
 
 ## Features
 
-- Launch the **Issue Triage** panel from the command palette (`Issue Triage: Open Panel`).
+- Launch the **Issue Triage** panel from the command palette (`Issue Triage: Open Panel`), the Issue Triage status bar button, or the **Issue Triage sidebar** in the Activity Bar.
+- Browse issues in the dedicated **Issue Triage sidebar** with:
+  - Repository drop-down (click the repository name to switch workspaces)
+  - Readiness distribution stats (click to filter, click again or **Clear Readiness Filter** to reset)
+  - Issue groups separated by assessment status (Not Assessed, Automation Ready, Prep Required, Needs Review, Manual Only)
+  - Quick actions: Open the full panel, refresh, assess individual issues, or send automation-ready issues to the AI agent
+  - Inline labels plus color-coded readiness dots that mirror the main panel
 - Authenticate with GitHub via device code to load repositories you own or collaborate on.
 - Browse open issues, search titles, and filter by label, assignee, or milestone inside VS Code.
 - See inline risk badges powered by historical GitHub activity to highlight hotspots before you assess them.
@@ -56,9 +62,8 @@ IssueTriage uses OpenRouter to power AI-driven assessments.
 
 ### 3. Open the Issue Triage panel
 
-1. Press `F1` or `Ctrl+Shift+P` to open the command palette.
-2. Run **Issue Triage: Open Panel**.
-3. Use **Connect GitHub** if prompted to complete the device-code flow (copy the displayed code, follow the browser prompt, and authorize the app).
+1. Click the **Issue Triage** icon in the Activity Bar (left sidebar) to see a quick list of issues, or press `F1` / `Ctrl+Shift+P` and run **Issue Triage: Open Panel** to open the full webview *(alternatively click the Issue Triage status bar button).* Use the repository drop-down at the top of the sidebar to change contexts at any time.
+2. Use **Connect GitHub** if prompted to complete the device-code flow (copy the displayed code, follow the browser prompt, and authorize the app).
 
 ### 4. Explore your backlog
 

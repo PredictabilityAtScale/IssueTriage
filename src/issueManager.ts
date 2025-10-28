@@ -263,6 +263,19 @@ export class IssueManager implements vscode.Disposable {
 		}
 	}
 
+	public async changeRepository(): Promise<void> {
+		try {
+			if (!(await this.auth.hasValidSession())) {
+				await this.auth.signIn();
+				this.state.session = await this.auth.getSessionMetadata();
+			}
+			await this.refreshRepositories(true);
+			await this.promptForRepository();
+		} catch (error) {
+			this.handleUserFacingError('Failed to change repository.', error);
+		}
+	}
+
 	public async refreshIssues(forceRefresh = false): Promise<void> {
 		if (!this.state.selectedRepository) {
 			return;

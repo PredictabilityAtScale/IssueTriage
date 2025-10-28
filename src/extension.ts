@@ -11,6 +11,7 @@ import { GitHubAuthService } from './services/githubAuthService';
 import { GitHubClient } from './services/githubClient';
 import type { IssueSummary } from './services/githubClient';
 import { IssueManager, FilterState, NewIssueDraftInput, NewIssueAnalysisResult, NewIssueSimilarityMatch } from './issueManager';
+import { IssueTreeProvider } from './issueTreeProvider';
 import { AssessmentStorage } from './services/assessmentStorage';
 import { AssessmentService, AssessmentError } from './services/assessmentService';
 import { CliToolService } from './services/cliToolService';
@@ -140,14 +141,34 @@ export function activate(context: vscode.ExtensionContext) {
 
 	console.log(`[IssueTriage] Extension activation completed in ${Date.now() - activationStart}ms`);
 
+	// Create tree view for sidebar
+	const issueTreeProvider = new IssueTreeProvider(issueManager, assessment);
+	const treeView = vscode.window.createTreeView('issuetriage.issuesView', {
+		treeDataProvider: issueTreeProvider,
+		showCollapseAll: true
+	});
+	context.subscriptions.push(treeView);
+
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
 		IssueTriagePanel.createOrShow(services);
 	});
 
 	context.subscriptions.push(openPanel);
 
+	const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+	statusBarItem.name = 'Issue Triage';
+	statusBarItem.text = '$(list-tree) Issue Triage';
+	statusBarItem.command = 'issuetriage.openPanel';
+	statusBarItem.tooltip = 'Open the Issue Triage panel';
+	statusBarItem.show();
+	context.subscriptions.push(statusBarItem);
+
 	const connectRepository = vscode.commands.registerCommand('issuetriage.connectRepository', async () => {
 		await services.issueManager.connectRepository();
+	});
+
+	const changeRepository = vscode.commands.registerCommand('issuetriage.changeRepository', async () => {
+		await services.issueManager.changeRepository();
 	});
 	const refreshIssues = vscode.commands.registerCommand('issuetriage.refreshIssues', async () => {
 		await services.issueManager.refreshIssues(true);
@@ -379,7 +400,72 @@ export function activate(context: vscode.ExtensionContext) {
 		await services.issueManager.signOut();
 	});
 
-	context.subscriptions.push(connectRepository, refreshIssues, assessIssue, runContextTool, backfillKeywords, trainModel, signOut);
+	const filterByReadiness = vscode.commands.registerCommand('issuetriage.filterByReadiness', async (firstArg?: unknown, secondArg?: unknown) => {
+		const candidate = typeof secondArg === 'string' ? secondArg : (typeof firstArg === 'string' ? firstArg : undefined);
+		const active = issueTreeProvider.setFilter(candidate);
+		services.telemetry.trackEvent('tree.filterByReadiness', { category: active ?? 'cleared' });
+	});
+
+	const sendToAutomation = vscode.commands.registerCommand('issuetriage.sendToAutomation', async (item?: unknown, rawIssueNumber?: unknown) => {
+		const snapshot = services.issueManager.getSnapshot();
+		const repository = snapshot.selectedRepository;
+		if (!repository) {
+			void vscode.window.showWarningMessage('No repository connected.');
+			return;
+		}
+
+		// Extract issue number from tree item or use selected issue
+		let issueNumber: number | undefined;
+		if (typeof rawIssueNumber === 'number') {
+			issueNumber = rawIssueNumber;
+		}
+		if (!issueNumber && item && typeof item === 'object') {
+			const treeItem = item as { metadata?: { issueNumber?: number }; label?: string };
+			const metadataNumber = treeItem.metadata?.issueNumber;
+			if (typeof metadataNumber === 'number') {
+				issueNumber = metadataNumber;
+			}
+			if (!issueNumber && typeof treeItem.label === 'string') {
+				const match = treeItem.label.match(/^#(\d+)/);
+				if (match) {
+					issueNumber = parseInt(match[1], 10);
+				}
+			}
+		}
+
+		if (!issueNumber) {
+			void vscode.window.showWarningMessage('No issue selected.');
+			return;
+		}
+
+		const automationEnabled = services.settings.get<boolean>('automation.launchEnabled', false);
+		if (!automationEnabled) {
+			const action = await vscode.window.showWarningMessage(
+				`Automation launch is currently disabled. Enable it in settings to send issues to the coding agent.`,
+				'Open Settings'
+			);
+			if (action === 'Open Settings') {
+				await vscode.commands.executeCommand('workbench.action.openSettings', 'issuetriage.automation.launchEnabled');
+			}
+			return;
+		}
+
+		const confirmation = await vscode.window.showInformationMessage(
+			`Send issue #${issueNumber} to automation coding agent?`,
+			{ modal: true },
+			'Yes', 'No'
+		);
+
+		if (confirmation === 'Yes') {
+			services.telemetry.trackEvent('automation.sendIssue', { 
+				repository: repository.fullName,
+				issueNumber: issueNumber.toString()
+			});
+			void vscode.window.showInformationMessage(`Issue #${issueNumber} queued for automation (placeholder - integration pending).`);
+		}
+	});
+
+	context.subscriptions.push(connectRepository, changeRepository, refreshIssues, assessIssue, runContextTool, backfillKeywords, trainModel, signOut, filterByReadiness, sendToAutomation);
 }
 
 // This method is called when your extension is deactivated
