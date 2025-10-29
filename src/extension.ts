@@ -12,6 +12,7 @@ import { GitHubClient } from './services/githubClient';
 import type { IssueSummary } from './services/githubClient';
 import { IssueManager, FilterState, NewIssueDraftInput, NewIssueAnalysisResult, NewIssueSimilarityMatch } from './issueManager';
 import { IssueTreeProvider } from './issueTreeProvider';
+import { SidebarMatrixView } from './sidebarMatrixView';
 import { AssessmentStorage } from './services/assessmentStorage';
 import { AssessmentService, AssessmentError } from './services/assessmentService';
 import { CliToolService } from './services/cliToolService';
@@ -148,6 +149,12 @@ export function activate(context: vscode.ExtensionContext) {
 		showCollapseAll: true
 	});
 	context.subscriptions.push(treeView);
+
+	const sidebarMatrixView = new SidebarMatrixView(context.extensionUri, issueManager);
+	context.subscriptions.push(sidebarMatrixView);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider('issuetriage.matrixOverview', sidebarMatrixView)
+	);
 
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
 		IssueTriagePanel.createOrShow(services);
@@ -900,6 +907,12 @@ class IssueTriagePanel {
 				flex-direction: column;
 				gap: 12px;
 				position: relative;
+			}
+
+			.issue-list-panel[hidden],
+			.matrix-panel[hidden],
+			.detail-panel[hidden] {
+				display: none;
 			}
 
 			.analysis-actions {
@@ -1736,44 +1749,6 @@ class IssueTriagePanel {
 					border-radius: 6px;
 				}
 
-				.ml-training-panel {
-					padding: 32px;
-					overflow-y: auto;
-					height: 100%;
-					box-sizing: border-box;
-				}
-
-				.ml-training-content {
-					max-width: 1200px;
-					margin: 0 auto;
-				}
-
-				.ml-training-content h2 {
-					margin-top: 0;
-					margin-bottom: 8px;
-					font-size: 20px;
-				}
-
-				.ml-description {
-					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-					margin-bottom: 24px;
-				}
-
-				.ml-section {
-					margin-bottom: 32px;
-					padding: 20px;
-					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
-					border-radius: 6px;
-					background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-button-background) 4%);
-				}
-
-				.ml-section h3 {
-					margin-top: 0;
-					margin-bottom: 12px;
-					font-size: 16px;
-				}
-
-				.ml-section p {
 					margin: 0 0 16px 0;
 					font-size: 13px;
 					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
@@ -2101,6 +2076,200 @@ class IssueTriagePanel {
 					}
 				}
 
+				.matrix-panel {
+					display: none;
+					flex-direction: column;
+					gap: 12px;
+					padding: 16px;
+					height: 100%;
+					box-sizing: border-box;
+					overflow-y: auto;
+					border-right: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+				}
+
+				.matrix-panel.visible {
+					display: flex;
+				}
+
+				.matrix-header {
+					display: flex;
+					flex-direction: column;
+					padding: 0;
+					gap: 6px;
+				}
+
+				.matrix-header h2 {
+					margin: 0;
+				}
+
+				.matrix-header p {
+					margin: 0;
+				}
+
+				.matrix-legend {
+					display: flex;
+					flex-wrap: wrap;
+					gap: 8px;
+				}
+
+				.matrix-legend-item {
+					display: inline-flex;
+					align-items: center;
+					gap: 6px;
+					font-size: 12px;
+					padding: 4px 8px;
+					border-radius: 999px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-button-background) 8%);
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.3));
+				}
+
+				.matrix-legend-swatch {
+					width: 10px;
+					height: 10px;
+					border-radius: 50%;
+				}
+
+				.matrix-legend-swatch.readiness-ready {
+					background: rgba(46, 160, 67, 0.9);
+				}
+
+				.matrix-legend-swatch.readiness-prepare {
+					background: rgba(187, 128, 9, 0.9);
+				}
+
+				.matrix-legend-swatch.readiness-review {
+					background: rgba(229, 140, 33, 0.9);
+				}
+
+				.matrix-legend-swatch.readiness-manual {
+					background: rgba(229, 83, 75, 0.9);
+				}
+
+				.matrix-main {
+					position: relative;
+					flex: 1;
+					min-height: 360px;
+					padding: 0;
+					margin: 0;
+					background: color-mix(in srgb, var(--vscode-editor-background) 95%, var(--vscode-button-background) 5%);
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 10px;
+					overflow: visible;
+					display: flex;
+				}
+
+				.matrix-main svg {
+					flex: 1;
+					width: 100%;
+					height: 100%;
+					overflow: visible;
+				}
+
+				.matrix-tooltip {
+					position: absolute;
+					pointer-events: none;
+					background: color-mix(in srgb, var(--vscode-editor-background) 96%, rgba(0,0,0,0.4));
+					border-radius: 6px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					padding: 8px 10px;
+					box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+					font-size: 12px;
+					max-width: 240px;
+					z-index: 5;
+				}
+
+				.matrix-tooltip strong {
+					display: block;
+					margin-bottom: 4px;
+				}
+
+				.matrix-empty {
+					text-align: center;
+					font-size: 13px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					border: 1px dashed var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					border-radius: 6px;
+					padding: 12px;
+					margin: 0;
+				}
+
+				.matrix-axis {
+					stroke: color-mix(in srgb, var(--vscode-editorForeground, #cccccc) 45%, transparent);
+					stroke-width: 0.8;
+					vector-effect: non-scaling-stroke;
+				}
+
+				.matrix-axis.axis-mid {
+					stroke-dasharray: 2 2;
+				}
+
+				.matrix-grid rect {
+					fill: none;
+				}
+
+				.matrix-label {
+					fill: color-mix(in srgb, var(--vscode-editorForeground, #cccccc) 20%, transparent);
+					font-size: 18px;
+					font-weight: 700;
+					text-transform: uppercase;
+				}
+
+				.matrix-label.do {
+					fill: color-mix(in srgb, var(--vscode-testing-iconPassed, #2ea043) 30%, transparent);
+				}
+
+				.matrix-label.avoid {
+					fill: color-mix(in srgb, rgba(229, 83, 75, 0.85) 35%, transparent);
+				}
+
+				.matrix-point {
+					fill: rgba(128, 128, 128, 0.75);
+					stroke: var(--vscode-editor-background);
+					stroke-width: 0.6;
+					vector-effect: non-scaling-stroke;
+					transition: r 0.15s ease, opacity 0.15s ease;
+					cursor: pointer;
+				}
+
+				.matrix-point[data-hovered="true"] {
+					r: 5;
+					opacity: 1;
+					stroke-width: 1.2;
+				}
+
+				.matrix-point.readiness-ready {
+					fill: rgba(46, 160, 67, 0.9);
+				}
+
+				.matrix-point.readiness-prepare {
+					fill: rgba(187, 128, 9, 0.9);
+				}
+
+				.matrix-point.readiness-review {
+					fill: rgba(229, 140, 33, 0.9);
+				}
+
+				.matrix-point.readiness-manual {
+					fill: rgba(229, 83, 75, 0.9);
+				}
+
+				.matrix-footnote {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+					margin-top: 28px;
+				}
+
+				@media (max-width: 860px) {
+					.matrix-panel {
+						padding: 12px;
+					}
+
+					.matrix-main {
+						min-height: 260px;
+						margin: 0;
+					}
+				}
+
 				.muted {
 					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
 					font-style: italic;
@@ -2156,9 +2325,27 @@ class IssueTriagePanel {
 				<button class="state-tab active" id="openTab" aria-pressed="true">Open</button>
 				<button class="state-tab" id="closedTab" aria-pressed="false">Closed</button>
 				<button class="state-tab" id="unlinkedTab" aria-pressed="false">Unlinked</button>
-				<button class="state-tab" id="mlTrainingTab" aria-pressed="false">ML Training</button>
+				<button class="state-tab" id="matrixTab" aria-pressed="false">Matrix</button>
+				<button class="state-tab" id="mlTrainingTab" aria-pressed="false" hidden>ML Training</button>
 			</div>
 			<div class="container" id="mainContainer">
+				<div id="matrixPanel" class="matrix-panel" aria-label="Readiness matrix" hidden>
+					<header class="matrix-header">
+						<div>
+							<h2>Readiness vs Business Value</h2>
+							<p class="muted">Prioritize automation-ready issues with the highest business impact.</p>
+						</div>
+						<div class="matrix-legend" id="readinessMatrixLegend" aria-hidden="true"></div>
+					</header>
+					<div class="matrix-main">
+						<svg id="readinessMatrixMain" viewBox="0 0 100 100" role="img" aria-labelledby="matrixMainTitle" preserveAspectRatio="xMidYMid meet">
+							<title id="matrixMainTitle">Issue readiness versus business value</title>
+						</svg>
+						<div id="readinessMatrixTooltip" class="matrix-tooltip" hidden></div>
+					</div>
+					<div id="readinessMatrixEmpty" class="matrix-empty" hidden>Run IssueTriage on open issues to populate this matrix.</div>
+					<p class="matrix-footnote">Readiness uses the composite IssueTriage score; business value comes directly from assessments.</p>
+				</div>
 				<div class="issue-list-panel" aria-label="Issue list and overview" id="issuesPanel">
 					<div id="issueSummary" class="meta-row" role="status" aria-live="polite"></div>
 					<div id="analysisActions" class="analysis-actions" hidden>
@@ -2185,7 +2372,7 @@ class IssueTriagePanel {
 						<div id="backfillBody" class="backfill-body"></div>
 					</section>
 				</div>
-				<div class="detail-panel" aria-label="Assessment detail">
+				<div class="detail-panel" aria-label="Assessment detail" id="detailPanel">
 					<h2 class="visually-hidden" id="assessmentHeading">Assessment detail</h2>
 					<section id="assessmentPanel" class="assessment-panel" aria-labelledby="assessmentHeading" aria-live="polite"></section>
 				</div>

@@ -46,6 +46,12 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 		if (!element) {
 			// Root level - show repository, stats, and issue groups
 			const snapshot = this.issueManager.getSnapshot();
+			if (snapshot.loading && (!snapshot.selectedRepository || !snapshot.repositories.length)) {
+				const loadingItem = new TreeItem('Loading Issue Triage…', vscode.TreeItemCollapsibleState.None, 'info');
+				loadingItem.iconPath = new vscode.ThemeIcon('sync~spin');
+				loadingItem.tooltip = 'Issue Triage is connecting and loading repository data.';
+				return [loadingItem];
+			}
 			
 			if (!snapshot.selectedRepository) {
 				return [

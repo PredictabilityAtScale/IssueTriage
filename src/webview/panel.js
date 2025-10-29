@@ -15,6 +15,18 @@
 		return /** @type {T} */ (element);
 	}
 
+	/**
+	 * @param {string} id
+	 * @returns {SVGSVGElement}
+	 */
+	function requireSvgElement(id) {
+		const element = document.getElementById(id);
+		if (!(element instanceof SVGSVGElement)) {
+			throw new Error('Missing expected SVG element #' + id);
+		}
+		return element;
+	}
+
 	const connectButton = /** @type {HTMLButtonElement} */ (requireElement('connect'));
 	const refreshButton = /** @type {HTMLButtonElement} */ (requireElement('refresh'));
 	const repositorySelect = /** @type {HTMLSelectElement} */ (requireElement('repositorySelect'));
@@ -33,17 +45,29 @@
 	const accountLabel = /** @type {HTMLElement} */ (requireElement('accountLabel'));
 	const automationBadge = /** @type {HTMLElement} */ (requireElement('automationBadge'));
 	const assessmentPanel = /** @type {HTMLElement} */ (requireElement('assessmentPanel'));
+	const detailPanel = /** @type {HTMLElement} */ (requireElement('detailPanel'));
 	const overviewMetrics = /** @type {HTMLElement} */ (requireElement('overviewMetrics'));
 	const openTab = /** @type {HTMLButtonElement} */ (requireElement('openTab'));
 	const closedTab = /** @type {HTMLButtonElement} */ (requireElement('closedTab'));
 	const unlinkedTab = /** @type {HTMLButtonElement} */ (requireElement('unlinkedTab'));
 	const mlTrainingTab = /** @type {HTMLButtonElement} */ (requireElement('mlTrainingTab'));
+	const matrixTab = /** @type {HTMLButtonElement} */ (requireElement('matrixTab'));
 	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
 	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
 	const analysisActions = /** @type {HTMLElement} */ (requireElement('analysisActions'));
 	const runAnalysisButton = /** @type {HTMLButtonElement} */ (requireElement('runAnalysisButton'));
 	const mlTrainingPanel = /** @type {HTMLElement} */ (requireElement('mlTrainingPanel'));
+	mlTrainingTab.hidden = true;
+	mlTrainingTab.setAttribute('aria-hidden', 'true');
+	mlTrainingTab.setAttribute('disabled', 'true');
+	mlTrainingPanel.hidden = true;
+	mlTrainingPanel.style.display = 'none';
+	const matrixPanel = /** @type {HTMLElement} */ (requireElement('matrixPanel'));
+	const readinessMatrixMain = requireSvgElement('readinessMatrixMain');
+	const readinessMatrixTooltip = /** @type {HTMLElement} */ (requireElement('readinessMatrixTooltip'));
+	const readinessMatrixEmpty = /** @type {HTMLElement} */ (requireElement('readinessMatrixEmpty'));
+	const readinessMatrixLegend = /** @type {HTMLElement} */ (requireElement('readinessMatrixLegend'));
 	const backfillMissingButton = /** @type {HTMLButtonElement} */ (requireElement('backfillMissingButton'));
 	const backfillAllButton = /** @type {HTMLButtonElement} */ (requireElement('backfillAllButton'));
 	const cancelBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('cancelBackfillButton'));
@@ -118,6 +142,19 @@
 
 	const READINESS_ORDER = ['ready', 'prepare', 'review', 'manual'];
 
+	/**
+	 * @typedef {Object} MatrixPoint
+	 * @property {number} issueNumber
+	 * @property {string} title
+	 * @property {number} readinessScore
+	 * @property {number} businessScore
+	 * @property {keyof typeof READINESS_DEFINITIONS} readinessKey
+	 * @property {string} readinessLabel
+	 * @property {string} url
+	 */
+
+	const MATRIX_MIDPOINT = 50;
+
 	/** @type {any} */
 	let latestState = null;
 	/** @type {number | undefined} */
@@ -139,6 +176,12 @@
 	/** @type {number | undefined} */
 	let currentCreateRequestId = undefined;
 	let requestIdCounter = 1;
+	/** @type {MatrixPoint[]} */
+	let readinessMatrixData = [];
+	/** @type {Map<number, MatrixPoint>} */
+	const readinessMatrixLookup = new Map();
+	/** @type {SVGCircleElement | null} */
+	let readinessMatrixHoverCircle = null;
 
 	/**
 	 * @param {string} question
@@ -841,6 +884,27 @@
 		}
 	});
 
+	matrixTab.addEventListener('click', () => {
+		if (currentTab === 'matrix') {
+			return;
+		}
+		console.log('[IssueTriage] Switching to matrix tab');
+		currentTab = 'matrix';
+		issueStateFilter = 'open';
+		updateStateTabs();
+		if (latestState) {
+			latestState = {
+				...latestState,
+				filters: {
+					...(latestState.filters ?? {}),
+					state: 'open'
+				}
+			};
+			renderState(latestState);
+		}
+		onFilterChanged();
+	});
+
 	mlTrainingTab.addEventListener('click', () => {
 		if (currentTab === 'mlTraining') {
 			return;
@@ -955,6 +1019,7 @@
 		const openSelected = currentTab === 'open';
 		const closedSelected = currentTab === 'closed';
 		const unlinkedSelected = currentTab === 'unlinked';
+		const matrixSelected = currentTab === 'matrix';
 		const mlTrainingSelected = currentTab === 'mlTraining';
 		openTab.classList.toggle('active', openSelected);
 		openTab.setAttribute('aria-pressed', openSelected ? 'true' : 'false');
@@ -962,6 +1027,8 @@
 		closedTab.setAttribute('aria-pressed', closedSelected ? 'true' : 'false');
 		unlinkedTab.classList.toggle('active', unlinkedSelected);
 		unlinkedTab.setAttribute('aria-pressed', unlinkedSelected ? 'true' : 'false');
+		matrixTab.classList.toggle('active', matrixSelected);
+		matrixTab.setAttribute('aria-pressed', matrixSelected ? 'true' : 'false');
 		mlTrainingTab.classList.toggle('active', mlTrainingSelected);
 		mlTrainingTab.setAttribute('aria-pressed', mlTrainingSelected ? 'true' : 'false');
 	}
@@ -1424,7 +1491,7 @@
 
 		const nextStateFilter = filters.state || 'open';
 		issueStateFilter = nextStateFilter;
-		if (currentTab !== 'unlinked' && currentTab !== 'mlTraining') {
+		if (currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix') {
 			currentTab = nextStateFilter;
 		}
 		updateStateTabs();
@@ -1434,8 +1501,15 @@
 		repositorySelect.innerHTML = '';
 		const defaultOption = document.createElement('option');
 		defaultOption.value = '';
-		defaultOption.textContent = repositories.length ? 'Select repository' : 'No repositories available';
+		const loadingRepositories = loading && (!repositories.length || !selectedRepository);
+		if (loadingRepositories) {
+			defaultOption.textContent = 'Loading repositories…';
+			defaultOption.disabled = true;
+		} else {
+			defaultOption.textContent = repositories.length ? 'Select repository' : 'No repositories available';
+		}
 		repositorySelect.appendChild(defaultOption);
+		repositorySelect.disabled = loadingRepositories;
 		repositories.forEach(/** @param {any} repo */ repo => {
 			const option = document.createElement('option');
 			option.value = repo.fullName;
@@ -1451,9 +1525,10 @@
 		renderFilterOptions(milestoneFilter, issueMetadata.milestones, filters.milestone, 'All milestones');
 		renderReadinessFilter(filters.readiness);
 		renderOverviewMetrics(dashboardMetrics);
+		renderReadinessMatrix(state);
 
-		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining';
-
+		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix';
+		const showMatrix = currentTab === 'matrix';
 		if (loadingState) {
 			loadingState.hidden = !showIssues || !loading;
 		}
@@ -1463,9 +1538,18 @@
 			issueList.removeAttribute('aria-busy');
 		}
 
-		overviewMetrics.hidden = !showIssues;
+		overviewMetrics.hidden = currentTab !== 'open' && currentTab !== 'closed';
 		issueList.hidden = !showIssues;
 		issuesPanel.hidden = !showIssues;
+		matrixPanel.hidden = !showMatrix;
+		matrixPanel.classList.toggle('visible', showMatrix);
+		matrixPanel.setAttribute('aria-hidden', showMatrix ? 'false' : 'true');
+		detailPanel.hidden = !(showIssues || showMatrix);
+		mainContainer.hidden = currentTab === 'mlTraining';
+		if (!showMatrix) {
+			readinessMatrixTooltip.hidden = true;
+			clearMatrixHover();
+		}
 
 		if (showIssues) {
 			if (!loading && issues.length === 0) {
@@ -1507,24 +1591,41 @@
 				issueSummary.textContent = '';
 			}
 		} else {
-			const work = unlinkedWork ?? { loading: false, pullRequests: [], commits: [] };
-			if (!selectedRepository) {
-				issueSummary.textContent = 'Connect to a repository to review unlinked work.';
-			} else if (work.loading) {
-				issueSummary.textContent = 'Scanning unlinked work…';
-			} else if (work.error) {
-				issueSummary.textContent = 'Unable to load unlinked work.';
-			} else {
-				const prCount = Array.isArray(work.pullRequests) ? work.pullRequests.length : 0;
-				const commitCount = Array.isArray(work.commits) ? work.commits.length : 0;
-				const summaryParts = [
-					prCount + (prCount === 1 ? ' unlinked pull request' : ' unlinked pull requests'),
-					commitCount + (commitCount === 1 ? ' unlinked commit' : ' unlinked commits')
-				];
-				if (work.lastUpdated) {
-					summaryParts.push('Updated ' + new Date(work.lastUpdated).toLocaleString());
+			if (currentTab === 'unlinked') {
+				const work = unlinkedWork ?? { loading: false, pullRequests: [], commits: [] };
+				if (!selectedRepository) {
+					issueSummary.textContent = 'Connect to a repository to review unlinked work.';
+				} else if (work.loading) {
+					issueSummary.textContent = 'Scanning unlinked work…';
+				} else if (work.error) {
+					issueSummary.textContent = 'Unable to load unlinked work.';
+				} else {
+					const prCount = Array.isArray(work.pullRequests) ? work.pullRequests.length : 0;
+					const commitCount = Array.isArray(work.commits) ? work.commits.length : 0;
+					const summaryParts = [
+						prCount + (prCount === 1 ? ' unlinked pull request' : ' unlinked pull requests'),
+						commitCount + (commitCount === 1 ? ' unlinked commit' : ' unlinked commits')
+					];
+					if (work.lastUpdated) {
+						summaryParts.push('Updated ' + new Date(work.lastUpdated).toLocaleString());
+					}
+					issueSummary.textContent = summaryParts.join(' · ');
 				}
-				issueSummary.textContent = summaryParts.join(' · ');
+			} else if (currentTab === 'matrix') {
+				if (!selectedRepository) {
+					issueSummary.textContent = 'Connect to a repository to plot assessed issues.';
+				} else if (loading) {
+					issueSummary.textContent = 'Preparing readiness matrix…';
+				} else if (readinessMatrixData.length) {
+					const assessed = readinessMatrixData.length === 1
+						? '1 assessed open issue plotted'
+						: readinessMatrixData.length + ' assessed open issues plotted';
+					issueSummary.textContent = 'Readiness matrix · ' + assessed;
+				} else {
+					issueSummary.textContent = 'Run IssueTriage assessments on open issues to populate the matrix.';
+				}
+			} else {
+				issueSummary.textContent = '';
 			}
 		}
 
@@ -1587,6 +1688,13 @@
 		if (!overviewMetrics) {
 			return;
 		}
+		const showMetrics = currentTab === 'open' || currentTab === 'closed';
+		if (!showMetrics) {
+			overviewMetrics.hidden = true;
+			overviewMetrics.innerHTML = '';
+			return;
+		}
+		overviewMetrics.hidden = false;
 		if (!metrics || metrics.totalIssuesAssessed === 0) {
 			overviewMetrics.innerHTML = '<div class="overview-empty">Run an IssueTriage assessment to unlock readiness insights.</div>';
 			return;
@@ -1605,6 +1713,299 @@
 			'<article class="overview-card"><h3>Average composite</h3><p class="overview-value">' + averageText + '</p><p class="overview-subtitle">Across assessed issues</p></article>' +
 			'<article class="overview-card overview-readiness"><h3>Readiness distribution</h3><ul class="readiness-distribution">' + readinessItems + '</ul></article>';
 	}
+
+	/**
+	 * @param {any} state
+	 */
+	function renderReadinessMatrix(state) {
+		updateMatrixLegend();
+		if (!state || !state.assessmentSummaries) {
+			readinessMatrixData = [];
+			readinessMatrixLookup.clear();
+			updateMatrixMain([], false);
+			return;
+		}
+		const filtersState = (state.filters?.state ?? 'open');
+		let dataset;
+		if (filtersState === 'open') {
+			dataset = collectMatrixPoints(state);
+			readinessMatrixData = dataset.slice();
+		} else {
+			dataset = readinessMatrixData.slice();
+		}
+		readinessMatrixLookup.clear();
+		for (const point of dataset) {
+			readinessMatrixLookup.set(point.issueNumber, point);
+		}
+		updateMatrixMain(dataset, Boolean(state.loading));
+	}
+
+	/**
+	 * @param {any} state
+	 * @returns {MatrixPoint[]}
+	 */
+	function collectMatrixPoints(state) {
+		const issues = Array.isArray(state.issues) ? state.issues : [];
+		const summaries = state.assessmentSummaries ?? {};
+		const points = [];
+		for (const issue of issues) {
+			if (!issue || issue.state !== 'open') {
+				continue;
+			}
+			const summary = summaries[issue.number];
+			if (!summary || typeof summary.businessScore !== 'number') {
+				continue;
+			}
+			const readinessScore = clampScore(summary.compositeScore);
+			const businessScore = clampScore(summary.businessScore);
+			const readinessInfo = getReadinessByKey(summary.readiness);
+			points.push({
+				issueNumber: issue.number,
+				title: typeof issue.title === 'string' ? issue.title : 'Issue #' + issue.number,
+				readinessScore,
+				businessScore,
+				readinessKey: summary.readiness,
+				readinessLabel: readinessInfo.label,
+				url: typeof issue.url === 'string' ? issue.url : ''
+			});
+		}
+		points.sort((a, b) => {
+			if (b.businessScore !== a.businessScore) {
+				return b.businessScore - a.businessScore;
+			}
+			return b.readinessScore - a.readinessScore;
+		});
+		return points;
+	}
+
+	/**
+	 * @param {number} value
+	 * @returns {number}
+	 */
+	function clampScore(value) {
+		const numeric = typeof value === 'number' ? value : Number(value);
+		if (!Number.isFinite(numeric)) {
+			return 0;
+		}
+		return Math.max(0, Math.min(100, Math.round(numeric * 10) / 10));
+	}
+	/**
+	 * @param {MatrixPoint[]} dataset
+	 * @param {boolean} loading
+	 */
+	function updateMatrixMain(dataset, loading) {
+		if (!readinessMatrixMain) {
+			return;
+		}
+	renderMatrixSvg(readinessMatrixMain, dataset);
+		matrixPanel.setAttribute('aria-busy', loading ? 'true' : 'false');
+		if (readinessMatrixEmpty) {
+			readinessMatrixEmpty.hidden = loading || dataset.length > 0;
+		}
+		if (!dataset.length) {
+			hideMatrixTooltip();
+		}
+	}
+
+	/**
+	 * @param {SVGSVGElement} svg
+	 * @param {MatrixPoint[]} dataset
+	 */
+	function renderMatrixSvg(svg, dataset) {
+		const radius = 3.6;
+		const labelOpacity = 0.52;
+		const avoidOpacity = Math.max(0, labelOpacity - 0.1);
+		const base = [
+			'<line class="matrix-axis" x1="0" y1="100" x2="100" y2="100"></line>',
+			'<line class="matrix-axis" x1="0" y1="0" x2="100" y2="0"></line>',
+			'<line class="matrix-axis" x1="0" y1="100" x2="0" y2="0"></line>',
+			'<line class="matrix-axis" x1="100" y1="100" x2="100" y2="0"></line>',
+			'<line class="matrix-axis axis-mid" x1="' + MATRIX_MIDPOINT + '" y1="100" x2="' + MATRIX_MIDPOINT + '" y2="0"></line>',
+			'<line class="matrix-axis axis-mid" x1="0" y1="' + MATRIX_MIDPOINT + '" x2="100" y2="' + MATRIX_MIDPOINT + '"></line>',
+			'<text class="matrix-label do" x="92" y="20" text-anchor="end" opacity="' + labelOpacity.toFixed(2) + '">Do</text>',
+			'<text class="matrix-label avoid" x="12" y="92" opacity="' + avoidOpacity.toFixed(2) + '">Avoid</text>',
+			'<text class="matrix-axis-label" x="50" y="104" text-anchor="middle" font-size="6" fill="currentColor" opacity="0.75">Readiness →</text>',
+			'<text class="matrix-axis-label" x="-6" y="50" text-anchor="middle" font-size="6" fill="currentColor" opacity="0.75" transform="rotate(-90 -6 50)">Business Value ←</text>'
+		];
+		const pointsMarkup = dataset.map(point => {
+			const cx = clampScore(point.readinessScore);
+			const cy = 100 - clampScore(point.businessScore);
+			const title = escapeHtml(point.title);
+			const readiness = point.readinessScore.toFixed(1);
+			const business = point.businessScore.toFixed(1);
+			const readinessLabel = escapeHtml(point.readinessLabel);
+			const urlAttr = point.url ? ' data-url="' + escapeHtml(point.url) + '"' : '';
+			return '<circle class="matrix-point readiness-' + point.readinessKey + '" data-issue="' + point.issueNumber + '" data-readiness="' + readiness + '" data-business="' + business + '" data-title="' + title + '" data-readiness-label="' + readinessLabel + '"' + urlAttr + ' cx="' + cx.toFixed(2) + '" cy="' + cy.toFixed(2) + '" r="' + radius + '" tabindex="0" role="button" aria-label="#' + point.issueNumber + ' · ' + title + '"></circle>';
+		}).join('');
+		svg.innerHTML = '<g class="matrix-grid">' + base.join('') + '</g><g class="matrix-points">' + pointsMarkup + '</g>';
+	}
+
+	function updateMatrixLegend() {
+		if (!readinessMatrixLegend) {
+			return;
+		}
+		const markup = READINESS_ORDER.map(key => {
+			const info = getReadinessByKey(key);
+			return '<span class="matrix-legend-item"><span class="matrix-legend-swatch readiness-' + key + '"></span>' + escapeHtml(info.label) + '</span>';
+		}).join('');
+		readinessMatrixLegend.innerHTML = markup;
+	}
+
+	/**
+	 * @param {PointerEvent} event
+	 */
+	function handleMatrixPointerMove(event) {
+		if (!(event.target instanceof SVGElement)) {
+			return;
+		}
+		const circle = event.target.closest('.matrix-point');
+		if (!(circle instanceof SVGCircleElement)) {
+			clearMatrixHover();
+			hideMatrixTooltip();
+			return;
+		}
+		if (readinessMatrixHoverCircle !== circle) {
+			clearMatrixHover();
+			readinessMatrixHoverCircle = circle;
+			circle.setAttribute('data-hovered', 'true');
+		}
+		const issueNumber = Number(circle.getAttribute('data-issue'));
+		const point = readinessMatrixLookup.get(issueNumber);
+		if (!point) {
+			return;
+		}
+		showMatrixTooltip(point, circle, { clientX: event.clientX, clientY: event.clientY });
+	}
+
+	function handleMatrixPointerLeave() {
+		clearMatrixHover();
+		hideMatrixTooltip();
+	}
+
+	/**
+	 * @param {MouseEvent} event
+	 */
+	function handleMatrixClick(event) {
+		if (!(event.target instanceof SVGElement)) {
+			return;
+		}
+		const circle = event.target.closest('.matrix-point');
+		if (circle instanceof SVGCircleElement) {
+			event.preventDefault();
+			openMatrixPoint(circle);
+		}
+	}
+
+	/**
+	 * @param {KeyboardEvent} event
+	 */
+	function handleMatrixKeydown(event) {
+		if (!(event.target instanceof SVGCircleElement)) {
+			return;
+		}
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			openMatrixPoint(event.target);
+		}
+	}
+
+	readinessMatrixMain.addEventListener('focusin', event => {
+		if (!(event.target instanceof SVGCircleElement)) {
+			return;
+		}
+		clearMatrixHover();
+		readinessMatrixHoverCircle = event.target;
+		readinessMatrixHoverCircle.setAttribute('data-hovered', 'true');
+		const issueNumber = Number(event.target.getAttribute('data-issue'));
+		const point = readinessMatrixLookup.get(issueNumber);
+		if (point) {
+			showMatrixTooltip(point, event.target, undefined);
+		}
+	});
+
+	readinessMatrixMain.addEventListener('focusout', event => {
+		if (!readinessMatrixMain.contains(/** @type {Node | null} */ (event.relatedTarget))) {
+			clearMatrixHover();
+			hideMatrixTooltip();
+		}
+	});
+
+	/**
+	 * @param {SVGCircleElement} circle
+	 */
+	function openMatrixPoint(circle) {
+		const issueNumber = Number(circle.getAttribute('data-issue'));
+		if (!Number.isFinite(issueNumber)) {
+			return;
+		}
+		selectIssue(issueNumber, true);
+	}
+
+	/**
+	 * @param {MatrixPoint} point
+	 * @param {SVGCircleElement} circle
+	 * @param {{ clientX?: number; clientY?: number } | undefined} position
+	 */
+	function showMatrixTooltip(point, circle, position) {
+		if (!readinessMatrixTooltip || !readinessMatrixMain) {
+			return;
+		}
+		const title = '#'+ point.issueNumber + ' · ' + escapeHtml(point.title);
+		const readiness = point.readinessScore.toFixed(1);
+		const business = point.businessScore.toFixed(1);
+		const readinessLabel = escapeHtml(point.readinessLabel);
+		readinessMatrixTooltip.innerHTML = '<strong>' + title + '</strong><div>' + readinessLabel + '</div><div>Readiness ' + readiness + ' · Business ' + business + '</div><div class="matrix-footnote">Click to view details</div>';
+		readinessMatrixTooltip.hidden = false;
+		readinessMatrixTooltip.style.left = '0px';
+		readinessMatrixTooltip.style.top = '0px';
+		const rect = readinessMatrixMain.getBoundingClientRect();
+		let clientX = position && typeof position.clientX === 'number' ? position.clientX : undefined;
+		let clientY = position && typeof position.clientY === 'number' ? position.clientY : undefined;
+		if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+			const matrix = circle.getScreenCTM();
+			if (matrix) {
+				const svgPoint = readinessMatrixMain.createSVGPoint();
+				svgPoint.x = circle.cx.baseVal.value;
+				svgPoint.y = circle.cy.baseVal.value;
+				const transformed = svgPoint.matrixTransform(matrix);
+				clientX = transformed.x;
+				clientY = transformed.y;
+			}
+		}
+		const tooltipRect = readinessMatrixTooltip.getBoundingClientRect();
+		const localX = Number.isFinite(clientX) ? /** @type {number} */ (clientX) - rect.left : rect.width / 2;
+		const localY = Number.isFinite(clientY) ? /** @type {number} */ (clientY) - rect.top : rect.height / 2;
+		let left = localX + 16;
+		let top = localY + 16;
+		if (left + tooltipRect.width > rect.width) {
+			left = rect.width - tooltipRect.width - 12;
+		}
+		if (top + tooltipRect.height > rect.height) {
+			top = rect.height - tooltipRect.height - 12;
+		}
+		left = Math.max(12, left);
+		top = Math.max(12, top);
+		readinessMatrixTooltip.style.left = left + 'px';
+		readinessMatrixTooltip.style.top = top + 'px';
+	}
+
+	function hideMatrixTooltip() {
+		if (readinessMatrixTooltip) {
+			readinessMatrixTooltip.hidden = true;
+		}
+	}
+
+	function clearMatrixHover() {
+		if (readinessMatrixHoverCircle) {
+			readinessMatrixHoverCircle.removeAttribute('data-hovered');
+			readinessMatrixHoverCircle = null;
+		}
+	}
+
+	readinessMatrixMain.addEventListener('pointermove', handleMatrixPointerMove);
+	readinessMatrixMain.addEventListener('pointerleave', handleMatrixPointerLeave);
+	readinessMatrixMain.addEventListener('click', handleMatrixClick);
+	readinessMatrixMain.addEventListener('keydown', handleMatrixKeydown);
 
 	/**
 	 * @param {any} issueNumber

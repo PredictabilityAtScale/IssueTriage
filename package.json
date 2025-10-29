@@ -92,6 +92,13 @@
           "id": "issuetriage.issuesView",
           "name": "Issues",
           "contextualTitle": "Issue Triage"
+        },
+        {
+          "id": "issuetriage.matrixOverview",
+          "name": "Opportunity Mix",
+          "contextualTitle": "Opportunity Mix",
+          "type": "webview",
+          "icon": "resources/icon.svg"
         }
       ]
     },

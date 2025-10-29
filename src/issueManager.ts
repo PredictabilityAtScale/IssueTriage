@@ -57,6 +57,7 @@ interface IssueAssessmentSummary {
 	readiness: AssessmentReadiness;
 	model: string;
 	updatedAt: string;
+	businessScore: number;
 }
 
 interface UnlinkedWorkState {
@@ -231,6 +232,7 @@ export class IssueManager implements vscode.Disposable {
 			if (!storedRepository) {
 				this.workspaceRepositorySlug = await this.detectWorkspaceRepositorySlug();
 			}
+			this.state.loading = true;
 			this.emitState();
 
 			if (session) {
@@ -241,6 +243,8 @@ export class IssueManager implements vscode.Disposable {
 			}
 		} catch (error) {
 			this.setError(error instanceof Error ? error.message : 'Failed to initialize Issue Manager.');
+		} finally {
+			this.setLoading(false);
 		}
 	}
 
@@ -957,7 +961,8 @@ export class IssueManager implements vscode.Disposable {
 				compositeScore: latest.compositeScore,
 				readiness,
 				model: latest.model,
-				updatedAt: latest.createdAt
+				updatedAt: latest.createdAt,
+				businessScore: latest.businessScore
 			};
 			for (const record of result.history) {
 				const created = Date.parse(record.createdAt);
