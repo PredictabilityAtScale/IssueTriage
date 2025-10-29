@@ -4,6 +4,10 @@
   "description": "An automated issue triage for risk and readiness assessment",
   "publisher": "PredictabilityAtScale",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PredictabilityAtScale/IssueTriage.git"
+  },
   "engines": {
     "vscode": "^1.105.0"
   },
