@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { KeywordExtractionService } from '../services/keywordExtractionService';
+import type { LlmGateway } from '../services/llmGateway';
 
 class MockSettings {
 	private readonly values: Record<string, any>;
@@ -32,7 +33,14 @@ suite('KeywordExtractionService', () => {
 			'assessment.standardModel': 'openai/gpt-5-mini'
 		});
 		const telemetry = new MockTelemetry();
-		const service = new KeywordExtractionService(settings as any, telemetry as any);
+		const gateway = {
+			getMode: () => 'local',
+			hasLocalApiKey: () => true,
+			requestChatCompletion: async () => {
+				throw new Error('Not implemented in keyword parsing tests');
+			}
+		} as unknown as LlmGateway;
+		const service = new KeywordExtractionService(settings as any, telemetry as any, gateway);
 
 		// Test the private parseKeywords method via type casting
 		const privateService = service as any;
@@ -71,7 +79,14 @@ suite('KeywordExtractionService', () => {
 			'assessment.standardModel': 'openai/gpt-5-mini'
 		});
 		const telemetry = new MockTelemetry();
-		const service = new KeywordExtractionService(settings as any, telemetry as any);
+		const gateway = {
+			getMode: () => 'local',
+			hasLocalApiKey: () => true,
+			requestChatCompletion: async () => {
+				throw new Error('Not implemented in keyword parsing tests');
+			}
+		} as unknown as LlmGateway;
+		const service = new KeywordExtractionService(settings as any, telemetry as any, gateway);
 		const privateService = service as any;
 
 		// Newline separated

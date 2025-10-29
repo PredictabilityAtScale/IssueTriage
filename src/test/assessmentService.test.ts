@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import { AssessmentService, AssessmentError } from '../services/assessmentService';
+import { LlmGateway } from '../services/llmGateway';
 import type { AssessmentRecord } from '../services/assessmentStorage';
 import type { SettingsService } from '../services/settingsService';
 import type { TelemetryService } from '../services/telemetryService';
@@ -132,7 +133,8 @@ suite('AssessmentService', () => {
 		const cli = new MockCliToolService();
 		const risk = new MockRiskService();
 
-		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService);
+		const llmGateway = new LlmGateway(settings as unknown as SettingsService);
+		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService, llmGateway);
 
 		await assert.rejects(async () => service.assessIssue('owner/repo', 1), (error: unknown) => {
 			assert.ok(error instanceof AssessmentError);
@@ -193,7 +195,8 @@ suite('AssessmentService', () => {
 			} as Response;
 		}) as FetchLike;
 
-		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService);
+		const llmGateway = new LlmGateway(settings as unknown as SettingsService);
+		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService, llmGateway);
 
 		const record = await service.assessIssue('owner/repo', 42);
 
@@ -269,7 +272,8 @@ suite('AssessmentService', () => {
 			} as Response;
 		}) as FetchLike;
 
-		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService);
+		const llmGateway = new LlmGateway(settings as unknown as SettingsService);
+		const service = new AssessmentService(storage as unknown as any, settings as unknown as SettingsService, telemetry as unknown as TelemetryService, github as unknown as GitHubClient, cli as unknown as CliToolService, risk as unknown as RiskIntelligenceService, llmGateway);
 		await service.assessIssue('owner/repo', 99);
 
 		const initLike = capturedBody as { body?: unknown } | undefined;

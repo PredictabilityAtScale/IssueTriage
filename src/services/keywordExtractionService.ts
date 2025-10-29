@@ -1,8 +1,7 @@
 import type { SettingsService } from './settingsService';
 import type { TelemetryService } from './telemetryService';
+import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
 import { GENERIC_KEYWORDS, normalizeKeywords } from './keywordUtils';
-
-const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 export interface KeywordExtractionResult {
 	keywords: string[];
@@ -12,7 +11,8 @@ export interface KeywordExtractionResult {
 export class KeywordExtractionService {
 	constructor(
 		private readonly settings: SettingsService,
-		private readonly telemetry: TelemetryService
+		private readonly telemetry: TelemetryService,
+		private readonly llm: LlmGateway
 	) {}
 
 	/**
@@ -23,50 +23,30 @@ export class KeywordExtractionService {
 		issueBody: string,
 		issueNumber?: number
 	): Promise<KeywordExtractionResult> {
-		const apiKey = this.settings.getWithEnvFallback(
-			'assessment.apiKey',
-			'ISSUETRIAGE_OPENROUTER_API_KEY'
-		);
-		
-		if (!apiKey) {
-			throw new Error(
-				'OpenRouter API key not configured. Update settings or set ISSUETRIAGE_OPENROUTER_API_KEY.'
-			);
-		}
-
 		const model = this.settings.get<string>('assessment.standardModel', 'openai/gpt-5-mini') ?? 'openai/gpt-5-mini';
 		const prompt = this.buildKeywordPrompt(issueTitle, issueBody);
 
 		try {
-			const response = await fetch(OPENROUTER_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: `Bearer ${apiKey}`,
-					'HTTP-Referer': 'https://github.com/troym/IssueTriage',
-					'X-Title': 'IssueTriage VS Code Extension'
-				},
-				body: JSON.stringify({
-					model,
-					messages: [
-						{
-							role: 'system',
-							content:
-								'You are a keyword extraction assistant. Extract 5-8 concise keywords from GitHub issues representing components, change types, and risk signals. Return ONLY a comma-separated list of lowercase keywords, no explanation.'
-						},
-						{
-							role: 'user',
-							content: prompt
-						}
-					],
-					temperature: 0.1,
-					max_tokens: 100
-				})
+			const response = await this.llm.requestChatCompletion({
+				model,
+				messages: [
+					{
+						role: 'system',
+						content:
+							'You are a keyword extraction assistant. Extract 5-8 concise keywords from GitHub issues representing components, change types, and risk signals. Return ONLY a comma-separated list of lowercase keywords, no explanation.'
+					},
+					{
+						role: 'user',
+						content: prompt
+					}
+				],
+				temperature: 0.1,
+				max_tokens: 100
 			});
 
 			if (!response.ok) {
 				const text = await response.text();
-				throw new Error(`OpenRouter request failed (${response.status}): ${text}`);
+				throw new Error(`LLM request failed (${response.status}): ${text}`);
 			}
 
 			const json = await response.json() as any;
@@ -74,7 +54,7 @@ export class KeywordExtractionService {
 			const tokensUsed = json?.usage?.total_tokens ?? 0;
 
 			if (typeof content !== 'string') {
-				throw new Error('OpenRouter response missing message content.');
+				throw new Error('LLM response missing message content.');
 			}
 
 			const keywords = this.parseKeywords(content.trim());
@@ -89,6 +69,9 @@ export class KeywordExtractionService {
 
 			return { keywords, tokensUsed };
 		} catch (error) {
+			if (error instanceof MissingApiKeyError) {
+				throw new Error(LOCAL_API_KEY_MISSING_MESSAGE);
+			}
 			this.telemetry.trackEvent('keywords.extractionFailed', {
 				issue: issueNumber ? String(issueNumber) : 'unknown',
 				message: error instanceof Error ? error.message : String(error)

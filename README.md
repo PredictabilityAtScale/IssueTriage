@@ -45,18 +45,23 @@ IssueTriage uses GitHub’s device flow to authenticate. Create a GitHub OAuth A
 	- Or set VS Code settings (`Settings → Extensions → IssueTriage`) for `issuetriage.github.oauthClientId` and `issuetriage.github.oauthClientSecret`.
 5. Reload VS Code after updating environment variables or settings (`Developer: Reload Window`).
 
-### 2. Configure OpenRouter (once per developer)
+### 2. Configure LLM access (once per developer)
 
-IssueTriage uses OpenRouter to power AI-driven assessments.
+IssueTriage can call OpenRouter directly (**local** mode) or forward requests through the hosted IssueTriage Cloudflare Worker (**remote** mode).
 
-1. Sign up at [OpenRouter](https://openrouter.ai/) and create an API key.
-2. Provide the key via one of the following:
-	- Add `ISSUETRIAGE_OPENROUTER_API_KEY=your_api_key` to `.env` (preferred for local development).
-	- Or set **Settings → Extensions → IssueTriage → Assessment: Api Key**.
-3. Adjust model selections if desired:
-			- `issuetriage.assessment.preferredModel` (default `openai/gpt-5-mini`).
-	- Toggle premium mode with `issuetriage.assessment.usePremiumModel` to use `issuetriage.assessment.premiumModel`.
-4. Reload VS Code after changing environment variables.
+1. Decide which mode to use by setting `ISSUETRIAGE_LLM_MODE` (or **Settings → Extensions → IssueTriage → Assessment: Llm Mode**) to `local` (default) or `remote`.
+2. For **remote mode**:
+  - Set `ISSUETRIAGE_LLM_REMOTE_URL` (or **Assessment: Remote Endpoint**) to your worker URL, for example `https://issue-triage-worker.troy-magennis.workers.dev`.
+  - No OpenRouter key is required locally because the worker holds it as a secret.
+3. For **local mode**:
+  - Sign up at [OpenRouter](https://openrouter.ai/) and create an API key.
+  - Provide the key via one of the following:
+    - Add `ISSUETRIAGE_OPENROUTER_API_KEY=your_api_key` to `.env` (preferred for local development).
+    - Or set **Settings → Extensions → IssueTriage → Assessment: Api Key**.
+4. Adjust model selections if desired:
+  - `issuetriage.assessment.preferredModel` (default `openai/gpt-5-mini`).
+  - Toggle premium mode with `issuetriage.assessment.usePremiumModel` to use `issuetriage.assessment.premiumModel`.
+5. Reload VS Code after changing environment variables.
 
 > **Automation Launch Guard**: Keep `issuetriage.automation.launchEnabled` at its default `false` while automation workflows are still in development. Enable it only when the downstream automation adapter is configured.
 

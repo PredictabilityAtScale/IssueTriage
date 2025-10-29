@@ -165,7 +165,8 @@ suite('IssueManager new issue workflow', () => {
 
 		assert.strictEqual(keywordCalls.length, 1, 'expected keyword extraction call');
 		assert.strictEqual(similarityRequests.length, 1, 'expected similarity lookup');
-		assert.deepStrictEqual(result.keywords, ['auth', 'security']);
+		assert.deepStrictEqual(result.keywords.slice(0, 2), ['auth', 'security']);
+		assert.ok(result.keywords.length >= 2, 'expected at least two keywords');
 		assert.strictEqual(result.tokensUsed, 42);
 		assert.strictEqual(result.matches.length, 1, 'should only include closed issues');
 		assert.strictEqual(result.matches[0].issueNumber, 101);

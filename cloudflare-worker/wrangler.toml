@@ -1,0 +1,10 @@
+name = "issue-triage-worker"
+main = "src/index.ts"
+compatibility_date = "2023-10-01"
+
+[vars]
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_SITE_URL = "https://issuetriage.com"
+OPENROUTER_APP_NAME = "issuetriage"
+GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
+GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"

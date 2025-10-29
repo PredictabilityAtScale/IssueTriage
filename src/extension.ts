@@ -26,6 +26,7 @@ import type { ExportResult } from './services/historicalDataService';
 import { SimilarityService } from './services/similarityService';
 import type { AssessmentRecord } from './services/assessmentStorage';
 import type { BackfillProgress, RiskSummary, ExportManifest } from './types/risk';
+import { LlmGateway } from './services/llmGateway';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
@@ -61,6 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
 		keywordExtractor: undefined!,
 		similarity: undefined!,
 		aiIntegration: new AIIntegrationService(),
+		llmGateway: undefined!,
 		extensionUri: context.extensionUri
 	};
 
@@ -90,7 +92,8 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log(`[IssueTriage] Risk storage created in ${Date.now() - riskStorageStart}ms`);
 
 	console.log('[IssueTriage] Creating ML services...');
-	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry);
+	const llmGateway = new LlmGateway(services.settings);
+	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry, llmGateway);
 	const similarity = new SimilarityService(riskStorage);
 	const keywordBackfill = new KeywordBackfillService(riskStorage, github, keywordExtractor, services.telemetry);
 	const historicalData = new HistoricalDataService(riskStorage, context.globalStorageUri.fsPath, services.telemetry);
@@ -99,7 +102,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry, keywordExtractor);
 
 	console.log('[IssueTriage] Creating assessment service...');
-	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk);
+	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk, llmGateway);
 
 	console.log('[IssueTriage] Creating issue manager...');
 	const issueManager = new IssueManager(
@@ -123,6 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
 	services.historicalData = historicalData;
 	services.keywordExtractor = keywordExtractor;
 	services.similarity = similarity;
+	services.llmGateway = llmGateway;
 
 	context.subscriptions.push(issueManager);
 	context.subscriptions.push(new vscode.Disposable(() => assessment.dispose()));
@@ -208,7 +212,7 @@ export function activate(context: vscode.ExtensionContext) {
 			title: `Assessing issue #${selection.issueNumber}`,
 			location: vscode.ProgressLocation.Notification
 		}, async progress => {
-			progress.report({ message: 'Requesting analysis from OpenRouter' });
+			progress.report({ message: 'Requesting analysis from LLM service' });
 			try {
 				const record = await services.assessment.assessIssue(repository.fullName, selection.issueNumber);
 				const composite = record.compositeScore.toFixed(1);
@@ -493,6 +497,7 @@ interface ServiceBundle {
 	keywordExtractor: KeywordExtractionService;
 	similarity: SimilarityService;
 	aiIntegration: AIIntegrationService;
+	llmGateway: LlmGateway;
 	extensionUri: vscode.Uri;
 }
 

@@ -1,0 +1,20 @@
+{
+  "name": "issue-triage-worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "format": "prettier --write \"src/**/*.{ts,js}\"",
+    "lint": "eslint \"src/**/*.{ts,js}\""
+  },
+  "dependencies": {
+    "itty-router": "^4.0.23"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231002.0",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.14.0"
+  }
+}

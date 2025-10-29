@@ -134,7 +134,7 @@ export function ensureKeywordCoverage(
 	const needsHeuristics = keywords.length < minCount || isGenericKeywordSet(keywords);
 	if (needsHeuristics) {
 		const heuristics = buildHeuristicKeywords(context, maxCount);
-		keywords = normalizeKeywords([...heuristics, ...keywords]);
+		keywords = normalizeKeywords([...keywords, ...heuristics]);
 	}
 	if (keywords.length < minCount) {
 		for (const fallback of GENERIC_KEYWORDS) {

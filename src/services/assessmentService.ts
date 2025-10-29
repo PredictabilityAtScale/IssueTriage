@@ -4,10 +4,10 @@ import { TelemetryService } from './telemetryService';
 import { GitHubClient, IssueDetail } from './githubClient';
 import { CliToolService } from './cliToolService';
 import { RiskIntelligenceService } from './riskIntelligenceService';
+import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
 import type { RiskSummary } from '../types/risk';
 
 const COMMENT_TAG = '<!-- IssueTriage Assessment -->';
-const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
 interface AssessmentModelPayload {
 	summary: string;
@@ -40,16 +40,16 @@ export class AssessmentService {
 		private readonly telemetry: TelemetryService,
 		private readonly github: GitHubClient,
 		private readonly cliTools: CliToolService,
-		private readonly risk: RiskIntelligenceService
+		private readonly risk: RiskIntelligenceService,
+		private readonly llm: LlmGateway
 	) {}
 
 	public dispose(): void {
 		void this.storage.dispose();
 	}
 	public async assessIssue(repository: string, issueNumber: number): Promise<AssessmentRecord> {
-		const apiKey = this.settings.getWithEnvFallback('assessment.apiKey', 'ISSUETRIAGE_OPENROUTER_API_KEY');
-		if (!apiKey) {
-			throw new AssessmentError('missingApiKey', 'OpenRouter API key not configured. Update settings or set ISSUETRIAGE_OPENROUTER_API_KEY.');
+		if (this.llm.getMode() === 'local' && !this.llm.hasLocalApiKey()) {
+			throw new AssessmentError('missingApiKey', LOCAL_API_KEY_MISSING_MESSAGE);
 		}
 
 		const model = this.resolveModel();
@@ -61,7 +61,7 @@ export class AssessmentService {
 		const issue = await this.github.getIssueDetails(repository, issueNumber);
 		const requestStartedAt = Date.now();
 		try {
-			const assessment = await this.generateAssessment(issue, apiKey, model);
+			const assessment = await this.generateAssessment(issue, model);
 			const riskSummary = this.risk.getSummary(repository, issueNumber);
 			const adjustedScores = this.applyRiskModifiers(assessment.scores, riskSummary);
 			const adjustedAssessment: AssessmentModelPayload & { rawResponse: string } = {
@@ -244,48 +244,42 @@ export class AssessmentService {
 		].join('\n');
 	}
 
-	private async generateAssessment(issue: IssueDetail, apiKey: string, model: string): Promise<AssessmentModelPayload & { rawResponse: string }> {
+	private async generateAssessment(issue: IssueDetail, model: string): Promise<AssessmentModelPayload & { rawResponse: string }> {
 		const payload = this.buildModelPayload(issue);
 		type FetchResponse = Awaited<ReturnType<typeof fetch>>;
 		let response: FetchResponse;
 		try {
-			response = await fetch(OPENROUTER_ENDPOINT, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: `Bearer ${apiKey}`,
-					'HTTP-Referer': 'https://github.com/troym/IssueTriage',
-					'X-Title': 'IssueTriage VS Code Extension'
-				},
-				body: JSON.stringify({
-					model,
-					messages: [
-						{
-							role: 'system',
-							content: 'You are IssueTriage, an assistant that evaluates GitHub issues for AUTOMATION READINESS by an autonomous AI coding agent. Score based on whether a coding agent can produce a working v1 implementation, NOT whether the issue has perfect specifications. The agent will handle implementation details (schemas, types, error handling, etc.). Score high when the issue clearly describes WHAT to build (user intent, problem to solve, success criteria). Score low only when critical information is missing that would prevent the agent from knowing WHAT problem to solve or WHICH of multiple valid approaches to take. Always respond with JSON matching the requested schema.'
-						},
-						{
-							role: 'user',
-							content: payload
-						}
-					],
-					temperature: 0.25
-				})
+			response = await this.llm.requestChatCompletion({
+				model,
+				messages: [
+					{
+						role: 'system',
+						content: 'You are IssueTriage, an assistant that evaluates GitHub issues for AUTOMATION READINESS by an autonomous AI coding agent. Score based on whether a coding agent can produce a working v1 implementation, NOT whether the issue has perfect specifications. The agent will handle implementation details (schemas, types, error handling, etc.). Score high when the issue clearly describes WHAT to build (user intent, problem to solve, success criteria). Score low only when critical information is missing that would prevent the agent from knowing WHAT problem to solve or WHICH of multiple valid approaches to take. Always respond with JSON matching the requested schema.'
+					},
+					{
+						role: 'user',
+						content: payload
+					}
+				],
+				temperature: 0.25
 			});
 		} catch (error) {
-			throw new AssessmentError('providerError', 'Failed to contact OpenRouter. Check your network connection and try again.', { cause: error instanceof Error ? error : undefined });
+			if (error instanceof MissingApiKeyError) {
+				throw new AssessmentError('missingApiKey', error.message);
+			}
+			throw new AssessmentError('providerError', 'Failed to contact the LLM service. Check your network connection and try again.', { cause: error instanceof Error ? error : undefined });
 		}
 
 		if (!response.ok) {
 			const text = await response.text();
-			throw new AssessmentError('providerError', `OpenRouter request failed (${response.status}): ${text}`);
+			throw new AssessmentError('providerError', `LLM request failed (${response.status}): ${text}`);
 		}
 
 		let json: unknown;
 		try {
 			json = await response.json();
 		} catch (error) {
-			throw new AssessmentError('invalidResponse', 'OpenRouter returned an unreadable response.', { cause: error instanceof Error ? error : undefined });
+			throw new AssessmentError('invalidResponse', 'The LLM provider returned an unreadable response.', { cause: error instanceof Error ? error : undefined });
 		}
 		const content = this.extractContent(json);
 		const parsed = this.parseAssessment(content);
@@ -359,7 +353,7 @@ export class AssessmentService {
 	private extractContent(response: any): string {
 		const content = response?.choices?.[0]?.message?.content;
 		if (typeof content !== 'string' || content.trim().length === 0) {
-			throw new AssessmentError('invalidResponse', 'OpenRouter response missing message content.');
+			throw new AssessmentError('invalidResponse', 'The LLM response is missing message content.');
 		}
 		return content.trim();
 	}

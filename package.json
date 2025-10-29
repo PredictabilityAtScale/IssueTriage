@@ -169,6 +169,20 @@
           "default": "",
           "markdownDescription": "OpenRouter API key used for assessments. Prefer the `ISSUETRIAGE_OPENROUTER_API_KEY` environment variable for local development."
         },
+        "issuetriage.assessment.llmMode": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote"
+          ],
+          "default": "local",
+          "markdownDescription": "Controls whether IssueTriage calls OpenRouter directly (`local`) or routes requests through the configured proxy (`remote`). Override via the `ISSUETRIAGE_LLM_MODE` environment variable."
+        },
+        "issuetriage.assessment.remoteEndpoint": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base URL for the IssueTriage LLM proxy when `llmMode` is set to `remote` (for example, `https://issue-triage-worker.troy-magennis.workers.dev`). Override via the `ISSUETRIAGE_LLM_REMOTE_URL` environment variable."
+        },
         "issuetriage.assessment.standardModel": {
           "type": "string",
           "default": "openai/gpt-5-mini",
