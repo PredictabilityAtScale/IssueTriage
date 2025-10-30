@@ -23,7 +23,8 @@ export class LlmGateway {
 
 	public getMode(): LlmMode {
 		const configured = this.settings.getWithEnvFallback('assessment.llmMode', 'ISSUETRIAGE_LLM_MODE');
-		return configured?.toLowerCase() === 'remote' ? 'remote' : 'local';
+		const normalized = configured?.toLowerCase();
+		return normalized === 'local' ? 'local' : 'remote';
 	}
 
 	public hasLocalApiKey(): boolean {
@@ -70,7 +71,7 @@ export class LlmGateway {
 		return (configured && configured.trim().length > 0 ? configured : DEFAULT_LOCAL_BASE_URL).replace(/\/+$/, '');
 	}
 
-	private getRemoteBaseUrl(): string {
+	public getRemoteBaseUrl(): string {
 		const configured = this.settings.getWithEnvFallback('assessment.remoteEndpoint', 'ISSUETRIAGE_LLM_REMOTE_URL');
 		return (configured && configured.trim().length > 0 ? configured : DEFAULT_REMOTE_BASE_URL).replace(/\/+$/, '');
 	}

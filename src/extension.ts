@@ -47,6 +47,8 @@ export function activate(context: vscode.ExtensionContext) {
 	const settings = new SettingsService();
 	console.log('[IssueTriage] Creating state service...');
 	const state = new StateService(context.globalState, context.workspaceState);
+	console.log('[IssueTriage] Creating LLM gateway...');
+	const llmGateway = new LlmGateway(settings);
 	const services: ServiceBundle = {
 		credentials: new CredentialService(context.secrets),
 		settings,
@@ -62,7 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
 		keywordExtractor: undefined!,
 		similarity: undefined!,
 		aiIntegration: new AIIntegrationService(),
-		llmGateway: undefined!,
+		llmGateway,
 		extensionUri: context.extensionUri
 	};
 
@@ -75,7 +77,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(secretSubscription);
 
 	console.log('[IssueTriage] Creating auth service...');
-	const auth = new GitHubAuthService(services.credentials, services.settings, services.state, services.telemetry);
+	const auth = new GitHubAuthService(services.credentials, services.state, services.telemetry, services.llmGateway);
 	console.log('[IssueTriage] Creating GitHub client...');
 	const github = new GitHubClient(auth, services.settings, services.telemetry);
 	console.log('[IssueTriage] Creating CLI tools service...');
@@ -92,8 +94,7 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log(`[IssueTriage] Risk storage created in ${Date.now() - riskStorageStart}ms`);
 
 	console.log('[IssueTriage] Creating ML services...');
-	const llmGateway = new LlmGateway(services.settings);
-	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry, llmGateway);
+	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry, services.llmGateway);
 	const similarity = new SimilarityService(riskStorage);
 	const keywordBackfill = new KeywordBackfillService(riskStorage, github, keywordExtractor, services.telemetry);
 	const historicalData = new HistoricalDataService(riskStorage, context.globalStorageUri.fsPath, services.telemetry);
@@ -102,7 +103,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry, keywordExtractor);
 
 	console.log('[IssueTriage] Creating assessment service...');
-	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk, llmGateway);
+	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk, services.llmGateway);
 
 	console.log('[IssueTriage] Creating issue manager...');
 	const issueManager = new IssueManager(
@@ -126,7 +127,6 @@ export function activate(context: vscode.ExtensionContext) {
 	services.historicalData = historicalData;
 	services.keywordExtractor = keywordExtractor;
 	services.similarity = similarity;
-	services.llmGateway = llmGateway;
 
 	context.subscriptions.push(issueManager);
 	context.subscriptions.push(new vscode.Disposable(() => assessment.dispose()));
@@ -168,11 +168,33 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
 	statusBarItem.name = 'Issue Triage';
-	statusBarItem.text = '$(list-tree) Issue Triage';
 	statusBarItem.command = 'issuetriage.openPanel';
-	statusBarItem.tooltip = 'Open the Issue Triage panel';
+	const updateStatusBar = () => {
+		const mode = services.llmGateway.getMode();
+		const label = mode === 'remote' ? 'Remote Proxy' : 'Local Direct';
+		statusBarItem.text = `$(list-tree) Issue Triage (${label})`;
+		const tooltipLines = [
+			'Open the Issue Triage panel',
+			`LLM mode: ${label}`,
+			'GitHub auth: Cloudflare worker proxy'
+		];
+		if (mode === 'remote') {
+			tooltipLines.push(`Proxy endpoint: ${services.llmGateway.getRemoteBaseUrl()}`);
+		} else {
+			tooltipLines.push('Assessments call OpenRouter directly with your local API key.');
+		}
+		statusBarItem.tooltip = tooltipLines.join('\n');
+	};
+	updateStatusBar();
 	statusBarItem.show();
 	context.subscriptions.push(statusBarItem);
+
+	const configurationSubscription = vscode.workspace.onDidChangeConfiguration(event => {
+		if (event.affectsConfiguration('issuetriage.assessment.llmMode') || event.affectsConfiguration('issuetriage.assessment.remoteEndpoint') || event.affectsConfiguration('issuetriage.assessment.apiKey')) {
+			updateStatusBar();
+		}
+	});
+	context.subscriptions.push(configurationSubscription);
 
 	const connectRepository = vscode.commands.registerCommand('issuetriage.connectRepository', async () => {
 		await services.issueManager.connectRepository();
@@ -184,7 +206,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const refreshIssues = vscode.commands.registerCommand('issuetriage.refreshIssues', async () => {
 		await services.issueManager.refreshIssues(true);
 	});
-	const assessIssue = vscode.commands.registerCommand('issuetriage.assessIssue', async () => {
+	const assessIssue = vscode.commands.registerCommand('issuetriage.assessIssue', async (treeItemOrIssueNumber?: unknown, explicitIssueNumber?: number) => {
 		const snapshot = services.issueManager.getSnapshot();
 		const repository = snapshot.selectedRepository;
 		if (!repository) {
@@ -197,27 +219,55 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		const picks = issues.map(issue => ({
-			label: `#${issue.number} · ${issue.title}`,
-			issueNumber: issue.number
-		}));
-		const selection = await vscode.window.showQuickPick(picks, {
-			placeHolder: 'Select an issue to assess'
-		});
-		if (!selection) {
+		const extractIssueNumber = (input: unknown): number | undefined => {
+			if (typeof input === 'number' && Number.isInteger(input)) {
+				return input;
+			}
+			if (!input || typeof input !== 'object') {
+				return undefined;
+			}
+			const candidate = input as { issueNumber?: unknown; metadata?: unknown };
+			if (typeof candidate.issueNumber === 'number' && Number.isInteger(candidate.issueNumber)) {
+				return candidate.issueNumber;
+			}
+			const metadata = candidate.metadata as { issueNumber?: unknown } | undefined;
+			if (metadata && typeof metadata.issueNumber === 'number' && Number.isInteger(metadata.issueNumber)) {
+				return metadata.issueNumber;
+			}
+			return undefined;
+		};
+
+		const issueNumberFromArgs = extractIssueNumber(explicitIssueNumber) ?? extractIssueNumber(treeItemOrIssueNumber);
+
+		const pickIssueNumber = async (): Promise<number | undefined> => {
+			const picks = issues.map(issue => ({
+				label: `#${issue.number} · ${issue.title}`,
+				issueNumber: issue.number
+			}));
+			const selection = await vscode.window.showQuickPick(picks, {
+				placeHolder: 'Select an issue to assess'
+			});
+			return selection?.issueNumber;
+		};
+
+		const issueNumber = issueNumberFromArgs ?? await pickIssueNumber();
+		if (typeof issueNumber !== 'number') {
 			return;
 		}
 
+		IssueTriagePanel.createOrShow(services);
+
 		await vscode.window.withProgress({
-			title: `Assessing issue #${selection.issueNumber}`,
+			title: `Assessing issue #${issueNumber}`,
 			location: vscode.ProgressLocation.Notification
 		}, async progress => {
 			progress.report({ message: 'Requesting analysis from LLM service' });
 			try {
-				const record = await services.assessment.assessIssue(repository.fullName, selection.issueNumber);
+				const record = await services.assessment.assessIssue(repository.fullName, issueNumber);
 				const composite = record.compositeScore.toFixed(1);
 				IssueTriagePanel.broadcastAssessment(record);
-				vscode.window.showInformationMessage(`IssueTriage assessment complete for #${selection.issueNumber} (Composite ${composite}).`);
+				void services.issueManager.refreshIssues(false);
+				vscode.window.showInformationMessage(`IssueTriage assessment complete for #${issueNumber} (Composite ${composite}).`);
 			} catch (error) {
 				const userMessage = formatAssessmentError(error);
 				vscode.window.showErrorMessage(`Assessment failed: ${userMessage}`);
@@ -3660,6 +3710,7 @@ class IssueTriagePanel {
 			issueNumber: record.issueNumber,
 			assessment: this.toWebviewAssessment(record)
 		});
+		void this.services.issueManager.refreshIssues(false);
 	}
 
 	private toWebviewAssessment(record: AssessmentRecord): Record<string, unknown> {

@@ -9,6 +9,7 @@ type Env = {
   ISSUETRIAGE_GITHUB_CLIENT_SECRET?: string;
   GITHUB_AUTHORIZE_URL?: string;
   GITHUB_TOKEN_URL?: string;
+  GITHUB_DEVICE_CODE_URL?: string;
 };
 
 const encoder = new TextEncoder();
@@ -173,6 +174,193 @@ router.post("/oauth/exchange", async (request: Request, env: Env) => {
       "content-type":
         upstream.headers.get("content-type") ?? "application/json",
     },
+  });
+});
+
+router.post("/oauth/device/start", async (request: Request, env: Env) => {
+  const clientId = env.ISSUETRIAGE_GITHUB_CLIENT_ID;
+  if (!clientId) {
+    return new Response("GitHub OAuth not configured", { status: 500 });
+  }
+
+  type StartPayload = {
+    scopes?: string[] | string;
+  };
+
+  let payload: StartPayload | undefined;
+  try {
+    payload = (await request.json()) as StartPayload;
+  } catch {
+    payload = undefined;
+  }
+
+  const scopes = Array.isArray(payload?.scopes)
+    ? payload?.scopes.filter((scope) => typeof scope === "string" && scope.trim().length > 0)
+    : typeof payload?.scopes === "string"
+      ? payload.scopes.split(/\s+/)
+      : [];
+
+  const scopeValue = scopes.length > 0 ? scopes.join(" ") : "repo read:user";
+  const deviceUrl = env.GITHUB_DEVICE_CODE_URL ?? "https://github.com/login/device/code";
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(deviceUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: clientId,
+        scope: scopeValue,
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Device authorization start failed";
+    return new Response(message, { status: 502 });
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = (await upstream.json()) as Record<string, unknown>;
+  } catch {
+    return new Response("Invalid response from GitHub", { status: 502 });
+  }
+
+  if (!upstream.ok || typeof data.error === "string") {
+    const description = typeof data.error_description === "string"
+      ? data.error_description
+      : typeof data.error === "string"
+        ? data.error
+        : "Device authorization failed";
+    return jsonResponse({
+      status: data.error ?? "error",
+      errorDescription: description,
+    }, { status: upstream.status >= 400 ? upstream.status : 400 });
+  }
+
+  const deviceCode = typeof data.device_code === "string" ? data.device_code : undefined;
+  const userCode = typeof data.user_code === "string" ? data.user_code : undefined;
+  const verificationUri = typeof data.verification_uri === "string" ? data.verification_uri : undefined;
+  const verificationUriComplete = typeof data.verification_uri_complete === "string"
+    ? data.verification_uri_complete
+    : undefined;
+  const expiresIn = typeof data.expires_in === "number" ? data.expires_in : Number(data.expires_in);
+  const interval = typeof data.interval === "number" ? data.interval : Number(data.interval);
+
+  if (!deviceCode || !userCode || !verificationUri || Number.isNaN(expiresIn) || Number.isNaN(interval)) {
+    return new Response("GitHub response missing device flow details", { status: 502 });
+  }
+
+  return jsonResponse({
+    deviceCode,
+    userCode,
+    verificationUri,
+    verificationUriComplete,
+    expiresIn,
+    interval,
+  });
+});
+
+router.post("/oauth/device/poll", async (request: Request, env: Env) => {
+  const clientId = env.ISSUETRIAGE_GITHUB_CLIENT_ID;
+  const clientSecret = env.ISSUETRIAGE_GITHUB_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return new Response("GitHub OAuth not configured", { status: 500 });
+  }
+
+  type PollPayload = {
+    deviceCode?: string;
+  };
+
+  let payload: PollPayload;
+  try {
+    payload = (await request.json()) as PollPayload;
+  } catch {
+    return new Response("Invalid JSON body", { status: 400 });
+  }
+
+  const deviceCode = typeof payload.deviceCode === "string" ? payload.deviceCode : undefined;
+  if (!deviceCode) {
+    return new Response("deviceCode is required", { status: 400 });
+  }
+
+  const tokenUrl = env.GITHUB_TOKEN_URL ?? "https://github.com/login/oauth/access_token";
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        device_code: deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Device authorization polling failed";
+    return new Response(message, { status: 502 });
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = (await upstream.json()) as Record<string, unknown>;
+  } catch {
+    return new Response("Invalid response from GitHub", { status: 502 });
+  }
+
+  if (!upstream.ok) {
+    const description = typeof data.error_description === "string"
+      ? data.error_description
+      : typeof data.error === "string"
+        ? data.error
+        : "Device authorization failed";
+    return jsonResponse({
+      status: data.error ?? "error",
+      errorDescription: description,
+    }, { status: upstream.status });
+  }
+
+  if (typeof data.error === "string") {
+    const description = typeof data.error_description === "string"
+      ? data.error_description
+      : data.error;
+    const retryAfter = typeof data.retry_after === "number" ? data.retry_after : undefined;
+    if (data.error === "authorization_pending" || data.error === "slow_down") {
+      return jsonResponse({
+        status: data.error,
+        errorDescription: description,
+        retryAfter,
+      }, { status: 202 });
+    }
+    return jsonResponse({
+      status: data.error,
+      errorDescription: description,
+    }, { status: 400 });
+  }
+
+  const accessToken = typeof data.access_token === "string" ? data.access_token : undefined;
+  if (!accessToken) {
+    return new Response("GitHub response missing access token", { status: 502 });
+  }
+
+  const refreshToken = typeof data.refresh_token === "string" ? data.refresh_token : undefined;
+  const expiresIn = typeof data.expires_in === "number" ? data.expires_in : Number(data.expires_in);
+  const scope = typeof data.scope === "string" ? data.scope : undefined;
+  const tokenType = typeof data.token_type === "string" ? data.token_type : undefined;
+
+  return jsonResponse({
+    accessToken,
+    refreshToken,
+    expiresIn: Number.isNaN(expiresIn) ? undefined : expiresIn,
+    scope,
+    tokenType,
   });
 });
 

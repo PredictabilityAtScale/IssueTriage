@@ -8,3 +8,8 @@ OPENROUTER_SITE_URL = "https://issuetriage.com"
 OPENROUTER_APP_NAME = "issuetriage"
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
+
+# Secrets (configure via: npx wrangler secret put <NAME>):
+# - ISSUETRIAGE_OPENROUTER_API_KEY: OpenRouter API key for LLM requests
+# - ISSUETRIAGE_GITHUB_CLIENT_SECRET: GitHub OAuth app client secret

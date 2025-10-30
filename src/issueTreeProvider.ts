@@ -382,11 +382,12 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 	}
 
 	private getReadinessCategory(compositeScore: number): 'ready' | 'prepare' | 'review' | 'manual' {
-		if (compositeScore >= 8.5) {
+		// Align thresholds with IssueManager.toReadiness (scores are 0-100)
+		if (compositeScore >= 80) {
 			return 'ready';
-		} else if (compositeScore >= 7.0) {
+		} else if (compositeScore >= 60) {
 			return 'prepare';
-		} else if (compositeScore >= 5.0) {
+		} else if (compositeScore >= 40) {
 			return 'review';
 		} else {
 			return 'manual';
