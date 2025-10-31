@@ -26,34 +26,22 @@ As of the Phase 1 build, the extension connects directly to GitHub, surfaces r
 
 ## Getting Started
 
-### 1. Configure GitHub OAuth (once per workspace)
+### 1. Connect GitHub (once per workspace)
 
-IssueTriage uses GitHub’s device flow to authenticate. Create a GitHub OAuth App and provide its credentials to the extension:
 
-1. Navigate to **GitHub → Settings → Developer settings → OAuth Apps** (org owners can create the app at the org level).
-2. Select **New OAuth App** and supply:
-	- **Application name**: `IssueTriage (Local)` (or similar)
-	- **Homepage URL**: `https://issuetriage.local`
-	- **Authorization callback URL**: `https://issuetriage.local/auth/callback`
-3. After creating the app copy the **Client ID** and generate a **Client Secret**.
-4. Provide the credentials to IssueTriage using one of the options below:
-	- Create a `.env` file in the repository root (already `.gitignore`d) with:
-	  ```bash
-	  ISSUETRIAGE_GITHUB_CLIENT_ID=your_client_id
-	  ISSUETRIAGE_GITHUB_CLIENT_SECRET=your_client_secret
-	  ```
-	- Or set VS Code settings (`Settings → Extensions → IssueTriage`) for `issuetriage.github.oauthClientId` and `issuetriage.github.oauthClientSecret`.
-5. Reload VS Code after updating environment variables or settings (`Developer: Reload Window`).
+1. Open the command palette and run **Issue Triage: Connect Repository** (or click **Connect GitHub** in the side panel).
+2. Follow the device-code prompt in the browser to authorize IssueTriage.
+3. Return to VS Code—once the worker confirms the authorization, the Issue Triage views will populate with your repositories.
 
 ### 2. Configure LLM access (once per developer)
 
-IssueTriage can call OpenRouter directly (**local** mode) or forward requests through the hosted IssueTriage Cloudflare Worker (**remote** mode).
+IssueTriage can call OpenRouter directly (**local** mode) or forward requests through the hosted IssueTriage Cloudflare Worker (**remote** mode). Remote mode is now the default.
 
-1. Decide which mode to use by setting `ISSUETRIAGE_LLM_MODE` (or **Settings → Extensions → IssueTriage → Assessment: Llm Mode**) to `local` (default) or `remote`.
-2. For **remote mode**:
-  - Set `ISSUETRIAGE_LLM_REMOTE_URL` (or **Assessment: Remote Endpoint**) to your worker URL, for example `https://issue-triage-worker.troy-magennis.workers.dev`.
+1. Confirm your desired mode via `ISSUETRIAGE_LLM_MODE` (or **Settings → Extensions → IssueTriage → Assessment: Llm Mode**). Leave it unset for the default **remote** flow.
+2. In **remote mode**:
+  - Optionally override the worker endpoint by setting `ISSUETRIAGE_LLM_REMOTE_URL` (or **Assessment: Remote Endpoint**); the default points to the hosted worker.
   - No OpenRouter key is required locally because the worker holds it as a secret.
-3. For **local mode**:
+3. In **local mode**:
   - Sign up at [OpenRouter](https://openrouter.ai/) and create an API key.
   - Provide the key via one of the following:
     - Add `ISSUETRIAGE_OPENROUTER_API_KEY=your_api_key` to `.env` (preferred for local development).
@@ -62,6 +50,15 @@ IssueTriage can call OpenRouter directly (**local** mode) or forward requests th
   - `issuetriage.assessment.preferredModel` (default `openai/gpt-5-mini`).
   - Toggle premium mode with `issuetriage.assessment.usePremiumModel` to use `issuetriage.assessment.premiumModel`.
 5. Reload VS Code after changing environment variables.
+
+### 2a. (Optional) Enable UsageTap logging
+
+IssueTriage can record LLM usage events to [UsageTap](https://usagetap.com/) when you supply the dedicated client API key:
+
+1. Set `ISSUETRIAGE_USAGETAP_KEY` (or **Settings → Extensions → IssueTriage → Telemetry: UsageTap Key**) to the call-logging key provisioned for VS Code clients.
+2. The service defaults to `https://api.usagetap.com`; override with `ISSUETRIAGE_USAGETAP_BASE_URL` (or **Telemetry: UsageTap Base Url**) if you are targeting a staging endpoint.
+3. UsageTap instrumentation respects the existing `issuetriage.telemetry.enabled` opt-in. Leave the extension setting off if you prefer to disable all telemetry.
+4. Turn on **Telemetry: UsageTap Debug** (or set `ISSUETRIAGE_USAGETAP_DEBUG=1`) to stream verbose integration logs to the *IssueTriage UsageTap* output channel while troubleshooting.
 
 > **Automation Launch Guard**: Keep `issuetriage.automation.launchEnabled` at its default `false` while automation workflows are still in development. Enable it only when the downstream automation adapter is configured.
 

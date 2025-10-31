@@ -216,6 +216,11 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		if (Number.isFinite(updatedAt) && updatedAt > calculatedAt) {
 			return true;
 		}
+		// Never mark closed issues as stale based on time alone - they won't change
+		// and keywords have already been extracted
+		if (issue.state === 'closed') {
+			return false;
+		}
 		return Date.now() - calculatedAt > CACHE_TTL_MS;
 	}
 

@@ -27,6 +27,7 @@ import { SimilarityService } from './services/similarityService';
 import type { AssessmentRecord } from './services/assessmentStorage';
 import type { BackfillProgress, RiskSummary, ExportManifest } from './types/risk';
 import { LlmGateway } from './services/llmGateway';
+import { UsageTapService } from './services/usageTapService';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
@@ -64,12 +65,18 @@ export function activate(context: vscode.ExtensionContext) {
 		keywordExtractor: undefined!,
 		similarity: undefined!,
 		aiIntegration: new AIIntegrationService(),
+		usageTap: undefined!,
 		llmGateway,
 		extensionUri: context.extensionUri
 	};
 
 	context.subscriptions.push(services.telemetry);
 	services.telemetry.trackEvent('extension.activate');
+
+	console.log('[IssueTriage] Creating UsageTap service...');
+	const usageTap = new UsageTapService(settings, services.telemetry);
+	services.usageTap = usageTap;
+	context.subscriptions.push(usageTap);
 
 	const secretSubscription = services.credentials.onDidChange(id => {
 		services.telemetry.trackEvent('credentials.changed', { scope: id });
@@ -94,7 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log(`[IssueTriage] Risk storage created in ${Date.now() - riskStorageStart}ms`);
 
 	console.log('[IssueTriage] Creating ML services...');
-	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry, services.llmGateway);
+	const keywordExtractor = new KeywordExtractionService(services.settings, services.telemetry, services.llmGateway, usageTap);
 	const similarity = new SimilarityService(riskStorage);
 	const keywordBackfill = new KeywordBackfillService(riskStorage, github, keywordExtractor, services.telemetry);
 	const historicalData = new HistoricalDataService(riskStorage, context.globalStorageUri.fsPath, services.telemetry);
@@ -103,7 +110,7 @@ export function activate(context: vscode.ExtensionContext) {
 	const risk = new RiskIntelligenceService(riskStorage, github, services.settings, services.telemetry, keywordExtractor);
 
 	console.log('[IssueTriage] Creating assessment service...');
-	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk, services.llmGateway);
+	const assessment = new AssessmentService(assessmentStorage, services.settings, services.telemetry, github, cliTools, risk, services.llmGateway, usageTap);
 
 	console.log('[IssueTriage] Creating issue manager...');
 	const issueManager = new IssueManager(
@@ -547,6 +554,7 @@ interface ServiceBundle {
 	keywordExtractor: KeywordExtractionService;
 	similarity: SimilarityService;
 	aiIntegration: AIIntegrationService;
+	usageTap: UsageTapService;
 	llmGateway: LlmGateway;
 	extensionUri: vscode.Uri;
 }

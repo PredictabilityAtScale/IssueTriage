@@ -1,6 +1,7 @@
 import type { SettingsService } from './settingsService';
 import type { TelemetryService } from './telemetryService';
 import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
+import type { UsageTapOperationHooks, UsageTapService } from './usageTapService';
 import { GENERIC_KEYWORDS, normalizeKeywords } from './keywordUtils';
 
 export interface KeywordExtractionResult {
@@ -12,7 +13,8 @@ export class KeywordExtractionService {
 	constructor(
 		private readonly settings: SettingsService,
 		private readonly telemetry: TelemetryService,
-		private readonly llm: LlmGateway
+		private readonly llm: LlmGateway,
+		private readonly usageTap?: UsageTapService
 	) {}
 
 	/**
@@ -26,8 +28,10 @@ export class KeywordExtractionService {
 		const model = this.settings.get<string>('assessment.standardModel', 'openai/gpt-5-mini') ?? 'openai/gpt-5-mini';
 		const prompt = this.buildKeywordPrompt(issueTitle, issueBody);
 
-		try {
-			const response = await this.llm.requestChatCompletion({
+		const execute = async (hooks?: UsageTapOperationHooks): Promise<KeywordExtractionResult> => {
+			let response: Awaited<ReturnType<typeof fetch>>;
+			try {
+				response = await this.llm.requestChatCompletion({
 				model,
 				messages: [
 					{
@@ -42,18 +46,38 @@ export class KeywordExtractionService {
 				],
 				temperature: 0.1,
 				max_tokens: 100
-			});
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				hooks?.setError(error instanceof MissingApiKeyError ? 'MISSING_API_KEY' : 'LLM_REQUEST_FAILED', message);
+				throw error;
+			}
 
 			if (!response.ok) {
 				const text = await response.text();
-				throw new Error(`LLM request failed (${response.status}): ${text}`);
+				const message = `LLM request failed (${response.status}): ${text}`;
+				hooks?.setError('LLM_HTTP_ERROR', message);
+				throw new Error(message);
 			}
 
-			const json = await response.json() as any;
+			let json: any;
+			try {
+				json = await response.json();
+			} catch (error) {
+				hooks?.setError('LLM_PARSE_ERROR', 'Keyword extraction response was unreadable.');
+				throw error instanceof Error ? error : new Error(String(error));
+			}
+
+			const usage = this.usageTap?.extractUsageFromOpenAIResponse(json, model);
+			if (usage && hooks) {
+				hooks.setUsage(usage);
+			}
+
 			const content = json?.choices?.[0]?.message?.content;
 			const tokensUsed = json?.usage?.total_tokens ?? 0;
 
 			if (typeof content !== 'string') {
+				hooks?.setError('LLM_RESPONSE_INVALID', 'Keyword extraction response missing content.');
 				throw new Error('LLM response missing message content.');
 			}
 
@@ -68,6 +92,27 @@ export class KeywordExtractionService {
 			}
 
 			return { keywords, tokensUsed };
+		};
+
+		const runner = async (): Promise<KeywordExtractionResult> => {
+			try {
+				if (!this.usageTap) {
+					return await execute();
+				}
+				const requested = this.usageTap.resolveRequestedEntitlements(model);
+				const tags = issueNumber ? ['keywords', `issue-${issueNumber}`] : ['keywords'];
+				return await this.usageTap.runWithUsage({
+					feature: 'keywords.extract',
+					requested,
+					tags
+				}, async hooks => execute(hooks));
+			} catch (error) {
+				throw error;
+			}
+		};
+
+		try {
+			return await runner();
 		} catch (error) {
 			if (error instanceof MissingApiKeyError) {
 				throw new Error(LOCAL_API_KEY_MISSING_MESSAGE);

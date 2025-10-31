@@ -144,6 +144,21 @@
           "default": true,
           "description": "Enable IssueTriage telemetry collection to improve automation readiness insights."
         },
+        "issuetriage.telemetry.usagetapKey": {
+          "type": "string",
+          "default": "ek-btNBcPLtj7iGrTduOP4I6bxbJhEWXMaNkpJBNfVIYuM",
+          "markdownDescription": "UsageTap API key used to record LLM usage events. Prefer the `ISSUETRIAGE_USAGETAP_KEY` environment variable when available."
+        },
+        "issuetriage.telemetry.usagetapBaseUrl": {
+          "type": "string",
+          "default": "https://api.usagetap.com",
+          "markdownDescription": "Override the UsageTap API base URL for staging or self-hosted deployments. Can be set via `ISSUETRIAGE_USAGETAP_BASE_URL`."
+        },
+        "issuetriage.telemetry.usagetapDebug": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Write verbose UsageTap integration logs to the `IssueTriage UsageTap` output channel. Alternatively set the `ISSUETRIAGE_USAGETAP_DEBUG` environment variable to `1`."
+        },
         "issuetriage.github.defaultRepository": {
           "type": "string",
           "default": "",
@@ -153,16 +168,6 @@
           "type": "string",
           "default": "",
           "description": "Optional organization login used to filter the repository list when connecting to GitHub."
-        },
-        "issuetriage.github.oauthClientId": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "GitHub OAuth application client ID used for device code authentication. Can be provided via the `ISSUETRIAGE_GITHUB_CLIENT_ID` environment variable."
-        },
-        "issuetriage.github.oauthClientSecret": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "GitHub OAuth application client secret used for device code authentication. Prefer setting the `ISSUETRIAGE_GITHUB_CLIENT_SECRET` environment variable instead of storing the secret in settings."
         },
         "issuetriage.assessment.apiKey": {
           "type": "string",
@@ -175,7 +180,7 @@
             "local",
             "remote"
           ],
-          "default": "local",
+          "default": "remote",
           "markdownDescription": "Controls whether IssueTriage calls OpenRouter directly (`local`) or routes requests through the configured proxy (`remote`). Override via the `ISSUETRIAGE_LLM_MODE` environment variable."
         },
         "issuetriage.assessment.remoteEndpoint": {
@@ -328,6 +333,7 @@
   "dependencies": {
     "@octokit/core": "^6.1.2",
     "@octokit/plugin-paginate-rest": "^11.4.0",
+    "@usagetap/sdk": "^0.6.0",
     "dotenv": "^16.4.5",
     "sql.js": "^1.9.0"
   },

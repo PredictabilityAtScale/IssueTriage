@@ -6,6 +6,7 @@ import { CliToolService } from './cliToolService';
 import { RiskIntelligenceService } from './riskIntelligenceService';
 import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
 import type { RiskSummary } from '../types/risk';
+import type { UsageTapOperationHooks, UsageTapService } from './usageTapService';
 
 const COMMENT_TAG = '<!-- IssueTriage Assessment -->';
 
@@ -41,7 +42,8 @@ export class AssessmentService {
 		private readonly github: GitHubClient,
 		private readonly cliTools: CliToolService,
 		private readonly risk: RiskIntelligenceService,
-		private readonly llm: LlmGateway
+		private readonly llm: LlmGateway,
+		private readonly usageTap?: UsageTapService
 	) {}
 
 	public dispose(): void {
@@ -61,7 +63,7 @@ export class AssessmentService {
 		const issue = await this.github.getIssueDetails(repository, issueNumber);
 		const requestStartedAt = Date.now();
 		try {
-			const assessment = await this.generateAssessment(issue, model);
+			const assessment = await this.generateAssessment(issue, model, repository, issueNumber);
 			const riskSummary = this.risk.getSummary(repository, issueNumber);
 			const adjustedScores = this.applyRiskModifiers(assessment.scores, riskSummary);
 			const adjustedAssessment: AssessmentModelPayload & { rawResponse: string } = {
@@ -244,49 +246,76 @@ export class AssessmentService {
 		].join('\n');
 	}
 
-	private async generateAssessment(issue: IssueDetail, model: string): Promise<AssessmentModelPayload & { rawResponse: string }> {
+	private async generateAssessment(issue: IssueDetail, model: string, repository: string, issueNumber: number): Promise<AssessmentModelPayload & { rawResponse: string }> {
 		const payload = this.buildModelPayload(issue);
-		type FetchResponse = Awaited<ReturnType<typeof fetch>>;
-		let response: FetchResponse;
-		try {
-			response = await this.llm.requestChatCompletion({
-				model,
-				messages: [
-					{
-						role: 'system',
-						content: 'You are IssueTriage, an assistant that evaluates GitHub issues for AUTOMATION READINESS by an autonomous AI coding agent. Score based on whether a coding agent can produce a working v1 implementation, NOT whether the issue has perfect specifications. The agent will handle implementation details (schemas, types, error handling, etc.). Score high when the issue clearly describes WHAT to build (user intent, problem to solve, success criteria). Score low only when critical information is missing that would prevent the agent from knowing WHAT problem to solve or WHICH of multiple valid approaches to take. Always respond with JSON matching the requested schema.'
-					},
-					{
-						role: 'user',
-						content: payload
-					}
-				],
-				temperature: 0.25
-			});
-		} catch (error) {
-			if (error instanceof MissingApiKeyError) {
-				throw new AssessmentError('missingApiKey', error.message);
+		const execute = async (hooks?: UsageTapOperationHooks): Promise<AssessmentModelPayload & { rawResponse: string }> => {
+			type FetchResponse = Awaited<ReturnType<typeof fetch>>;
+			let response: FetchResponse;
+			try {
+				response = await this.llm.requestChatCompletion({
+					model,
+					messages: [
+						{
+							role: 'system',
+							content: 'You are IssueTriage, an assistant that evaluates GitHub issues for AUTOMATION READINESS by an autonomous AI coding agent. Score based on whether a coding agent can produce a working v1 implementation, NOT whether the issue has perfect specifications. The agent will handle implementation details (schemas, types, error handling, etc.). Score high when the issue clearly describes WHAT to build (user intent, problem to solve, success criteria). Score low only when critical information is missing that would prevent the agent from knowing WHAT problem to solve or WHICH of multiple valid approaches to take. Always respond with JSON matching the requested schema.'
+						},
+						{
+							role: 'user',
+							content: payload
+						}
+					],
+					temperature: 0.25
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				hooks?.setError(error instanceof MissingApiKeyError ? 'MISSING_API_KEY' : 'LLM_REQUEST_FAILED', message);
+				if (error instanceof MissingApiKeyError) {
+					throw new AssessmentError('missingApiKey', error.message);
+				}
+				throw new AssessmentError('providerError', 'Failed to contact the LLM service. Check your network connection and try again.', { cause: error instanceof Error ? error : undefined });
 			}
-			throw new AssessmentError('providerError', 'Failed to contact the LLM service. Check your network connection and try again.', { cause: error instanceof Error ? error : undefined });
-		}
 
-		if (!response.ok) {
-			const text = await response.text();
-			throw new AssessmentError('providerError', `LLM request failed (${response.status}): ${text}`);
-		}
+			if (!response.ok) {
+				const text = await response.text();
+				const message = `LLM request failed (${response.status}): ${text}`;
+				hooks?.setError('LLM_HTTP_ERROR', message);
+				throw new AssessmentError('providerError', message);
+			}
 
-		let json: unknown;
-		try {
-			json = await response.json();
-		} catch (error) {
-			throw new AssessmentError('invalidResponse', 'The LLM provider returned an unreadable response.', { cause: error instanceof Error ? error : undefined });
-		}
-		const content = this.extractContent(json);
-		const parsed = this.parseAssessment(content);
-		return {
-			...parsed,
-			rawResponse: JSON.stringify(json)
+			let json: unknown;
+			try {
+				json = await response.json();
+			} catch (error) {
+				hooks?.setError('LLM_PARSE_ERROR', 'The LLM provider returned an unreadable response.');
+				throw new AssessmentError('invalidResponse', 'The LLM provider returned an unreadable response.', { cause: error instanceof Error ? error : undefined });
+			}
+			const usage = this.usageTap?.extractUsageFromOpenAIResponse(json, model);
+			if (usage && hooks) {
+				hooks.setUsage(usage);
+			}
+			const content = this.extractContent(json);
+			const parsed = this.parseAssessment(content);
+			return {
+				...parsed,
+				rawResponse: JSON.stringify(json)
+			};
 		};
+
+		if (!this.usageTap) {
+			return execute();
+		}
+
+		const requested = this.usageTap.resolveRequestedEntitlements(model);
+		const sanitizedRepo = repository.replace(/[^a-z0-9-_.]/gi, '_');
+		const idempotency = `assessment:${sanitizedRepo}:${issueNumber}`;
+		const tags = ['assessment', repository];
+
+		return this.usageTap.runWithUsage({
+			feature: 'assessment.generate',
+			requested,
+			tags,
+			idempotency
+		}, async hooks => execute(hooks));
 	}
 
 	private buildModelPayload(issue: IssueDetail): string {
