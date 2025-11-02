@@ -79,14 +79,17 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 			repoItem.iconPath = new vscode.ThemeIcon('repo');
 			items.push(repoItem);
 
-			if (snapshot.issues.length === 0) {
-				items.push(new TreeItem('No issues found', vscode.TreeItemCollapsibleState.None, 'info'));
+			// ALWAYS filter to show only open issues in the sidebar, regardless of main panel state
+			const openIssues = this.issueManager.getCachedOpenIssues();
+
+			if (openIssues.length === 0) {
+				items.push(new TreeItem('No open issues found', vscode.TreeItemCollapsibleState.None, 'info'));
 				return items;
 			}
 
-			// Calculate readiness distribution
-			const distribution = await this.calculateReadinessDistribution(snapshot.issues, snapshot.selectedRepository.fullName);
-			const total = snapshot.issues.length;
+			// Calculate readiness distribution for open issues only
+			const distribution = await this.calculateReadinessDistribution(openIssues, snapshot.selectedRepository.fullName);
+			const total = openIssues.length;
 			const assessed = distribution.ready + distribution.prepare + distribution.review + distribution.manual;
 			const notAssessed = total - assessed;
 			const metrics = {
@@ -97,9 +100,9 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 				notAssessed
 			};
 
-			// Summary stats
+			// Summary stats - always showing open issues count
 			items.push(new TreeItem(
-				`${snapshot.issues.filter(i => i.state === 'open').length} open / ${total} total`,
+				`${total} open issue${total !== 1 ? 's' : ''}`,
 				vscode.TreeItemCollapsibleState.None,
 				'stats'
 			));
@@ -140,9 +143,12 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 				return [];
 			}
 
+			// ALWAYS filter to open issues only - use cached open issues independent of main panel filter
+			const openIssues = this.issueManager.getCachedOpenIssues();
+
 			const metrics = element.metadata as { repository: string; distribution: ReadinessDistribution } | undefined;
 			const repository = metrics?.repository ?? snapshot.selectedRepository.fullName;
-			const distribution = metrics?.distribution ?? await this.calculateReadinessDistribution(snapshot.issues, repository);
+			const distribution = metrics?.distribution ?? await this.calculateReadinessDistribution(openIssues, repository);
 			const filters: TreeItem[] = [];
 
 			if (distribution.ready > 0) {
@@ -229,10 +235,13 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 				return [];
 			}
 
+			// ALWAYS filter to open issues only - use cached open issues independent of main panel filter
+			const openIssues = this.issueManager.getCachedOpenIssues();
+
 			const metrics = element.metadata as { repository: string; distribution: ReadinessDistribution; notAssessed: number } | undefined;
 			const repository = metrics?.repository ?? snapshot.selectedRepository.fullName;
-			const distribution = metrics?.distribution ?? await this.calculateReadinessDistribution(snapshot.issues, repository);
-			const notAssessed = metrics?.notAssessed ?? (snapshot.issues.length - (distribution.ready + distribution.prepare + distribution.review + distribution.manual));
+			const distribution = metrics?.distribution ?? await this.calculateReadinessDistribution(openIssues, repository);
+			const notAssessed = metrics?.notAssessed ?? (openIssues.length - (distribution.ready + distribution.prepare + distribution.review + distribution.manual));
 			const groups: TreeItem[] = [];
 			const includeGroup = (key: string): boolean => {
 				return !this.activeFilter || this.activeFilter === key;
@@ -320,8 +329,11 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 				return [];
 			}
 
+			// ALWAYS filter to open issues only - use cached open issues independent of main panel filter
+			const openIssues = this.issueManager.getCachedOpenIssues();
+
 			const category = element.contextValue.replace('issueGroup', '').toLowerCase();
-			const filteredIssues = await this.filterIssuesByCategory(snapshot.issues, snapshot.selectedRepository.fullName, category);
+			const filteredIssues = await this.filterIssuesByCategory(openIssues, snapshot.selectedRepository.fullName, category);
 			
 			return Promise.all(filteredIssues.map(issue => this.createIssueTreeItem(issue, snapshot.selectedRepository!.fullName, category)));
 		}

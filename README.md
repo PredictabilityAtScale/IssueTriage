@@ -53,12 +53,11 @@ IssueTriage can call OpenRouter directly (**local** mode) or forward requests th
 
 ### 2a. (Optional) Enable UsageTap logging
 
-IssueTriage can record LLM usage events to [UsageTap](https://usagetap.com/) when you supply the dedicated client API key:
+IssueTriage records LLM usage events to [UsageTap](https://usagetap.com/) using a restricted, embedded client key dedicated to begin/end call telemetry.
 
-1. Set `ISSUETRIAGE_USAGETAP_KEY` (or **Settings → Extensions → IssueTriage → Telemetry: UsageTap Key**) to the call-logging key provisioned for VS Code clients.
-2. The service defaults to `https://api.usagetap.com`; override with `ISSUETRIAGE_USAGETAP_BASE_URL` (or **Telemetry: UsageTap Base Url**) if you are targeting a staging endpoint.
-3. UsageTap instrumentation respects the existing `issuetriage.telemetry.enabled` opt-in. Leave the extension setting off if you prefer to disable all telemetry.
-4. Turn on **Telemetry: UsageTap Debug** (or set `ISSUETRIAGE_USAGETAP_DEBUG=1`) to stream verbose integration logs to the *IssueTriage UsageTap* output channel while troubleshooting.
+1. Requests always target `https://api.usagetap.com` with the baked-in credential; no extra configuration is required.
+2. UsageTap instrumentation still respects the existing `issuetriage.telemetry.enabled` opt-in. Leave the extension setting off if you prefer to disable all telemetry.
+3. Turn on **Telemetry: UsageTap Debug** (or set `ISSUETRIAGE_USAGETAP_DEBUG=1`) to stream verbose integration logs to the *IssueTriage UsageTap* output channel while troubleshooting.
 
 > **Automation Launch Guard**: Keep `issuetriage.automation.launchEnabled` at its default `false` while automation workflows are still in development. Enable it only when the downstream automation adapter is configured.
 

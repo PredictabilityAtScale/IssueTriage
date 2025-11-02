@@ -2,6 +2,27 @@
 (function() {
 	const vscodeApi = (/** @type {any} */ (window)).acquireVsCodeApi();
 
+	(function syncThemeSurface() {
+		try {
+			const computed = getComputedStyle(document.documentElement);
+			const editorBg = (computed.getPropertyValue('--vscode-editor-background') || '').trim();
+			if (editorBg) {
+				document.body.style.background = editorBg;
+			} else {
+				document.body.style.background = '#1e1e1e';
+			}
+			const fg = (computed.getPropertyValue('--vscode-editor-foreground')
+				|| computed.getPropertyValue('--vscode-foreground')
+				|| '').trim();
+			if (fg) {
+				document.body.style.color = fg;
+			}
+		} catch (error) {
+			console.warn('[IssueTriage] Failed to sync webview theme surface', error);
+			document.body.style.background = '#1e1e1e';
+		}
+	}());
+
 	/**
 	 * @template {HTMLElement} T
 	 * @param {string} id
@@ -52,6 +73,8 @@
 	const unlinkedTab = /** @type {HTMLButtonElement} */ (requireElement('unlinkedTab'));
 	const mlTrainingTab = /** @type {HTMLButtonElement} */ (requireElement('mlTrainingTab'));
 	const matrixTab = /** @type {HTMLButtonElement} */ (requireElement('matrixTab'));
+	const llmUsageTab = /** @type {HTMLButtonElement} */ (requireElement('llmUsageTab'));
+	console.log('[IssueTriage] llmUsageTab element:', llmUsageTab, 'disabled:', llmUsageTab.disabled, 'hidden:', llmUsageTab.hidden);
 	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
 	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
@@ -64,6 +87,7 @@
 	mlTrainingPanel.hidden = true;
 	mlTrainingPanel.style.display = 'none';
 	const matrixPanel = /** @type {HTMLElement} */ (requireElement('matrixPanel'));
+	const llmUsagePanel = /** @type {HTMLElement} */ (requireElement('llmUsagePanel'));
 	const readinessMatrixMain = requireSvgElement('readinessMatrixMain');
 	const readinessMatrixTooltip = /** @type {HTMLElement} */ (requireElement('readinessMatrixTooltip'));
 	const readinessMatrixEmpty = /** @type {HTMLElement} */ (requireElement('readinessMatrixEmpty'));
@@ -905,6 +929,20 @@
 		onFilterChanged();
 	});
 
+	llmUsageTab.addEventListener('click', (event) => {
+		console.log('[IssueTriage] LLM Usage tab clicked!', event);
+		if (currentTab === 'llmUsage') {
+			console.log('[IssueTriage] Already on LLM Usage tab');
+			return;
+		}
+		console.log('[IssueTriage] Switching to LLM Usage tab');
+		currentTab = 'llmUsage';
+		updateStateTabs();
+		if (latestState) {
+			renderState(latestState);
+		}
+	});
+
 	mlTrainingTab.addEventListener('click', () => {
 		if (currentTab === 'mlTraining') {
 			return;
@@ -1020,6 +1058,7 @@
 		const closedSelected = currentTab === 'closed';
 		const unlinkedSelected = currentTab === 'unlinked';
 		const matrixSelected = currentTab === 'matrix';
+		const llmUsageSelected = currentTab === 'llmUsage';
 		const mlTrainingSelected = currentTab === 'mlTraining';
 		openTab.classList.toggle('active', openSelected);
 		openTab.setAttribute('aria-pressed', openSelected ? 'true' : 'false');
@@ -1029,6 +1068,8 @@
 		unlinkedTab.setAttribute('aria-pressed', unlinkedSelected ? 'true' : 'false');
 		matrixTab.classList.toggle('active', matrixSelected);
 		matrixTab.setAttribute('aria-pressed', matrixSelected ? 'true' : 'false');
+		llmUsageTab.classList.toggle('active', llmUsageSelected);
+		llmUsageTab.setAttribute('aria-pressed', llmUsageSelected ? 'true' : 'false');
 		mlTrainingTab.classList.toggle('active', mlTrainingSelected);
 		mlTrainingTab.setAttribute('aria-pressed', mlTrainingSelected ? 'true' : 'false');
 	}
@@ -1491,7 +1532,7 @@
 
 		const nextStateFilter = filters.state || 'open';
 		issueStateFilter = nextStateFilter;
-		if (currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix') {
+		if (currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix' && currentTab !== 'llmUsage') {
 			currentTab = nextStateFilter;
 		}
 		updateStateTabs();
@@ -1527,7 +1568,7 @@
 		renderOverviewMetrics(dashboardMetrics);
 		renderReadinessMatrix(state);
 
-		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix';
+		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix' && currentTab !== 'llmUsage';
 		const showMatrix = currentTab === 'matrix';
 		if (loadingState) {
 			loadingState.hidden = !showIssues || !loading;
@@ -1538,12 +1579,16 @@
 			issueList.removeAttribute('aria-busy');
 		}
 
+		const showLlmUsage = currentTab === 'llmUsage';
 		overviewMetrics.hidden = currentTab !== 'open' && currentTab !== 'closed';
 		issueList.hidden = !showIssues;
 		issuesPanel.hidden = !showIssues;
 		matrixPanel.hidden = !showMatrix;
 		matrixPanel.classList.toggle('visible', showMatrix);
 		matrixPanel.setAttribute('aria-hidden', showMatrix ? 'false' : 'true');
+		llmUsagePanel.hidden = !showLlmUsage;
+		llmUsagePanel.classList.toggle('visible', showLlmUsage);
+		llmUsagePanel.setAttribute('aria-hidden', showLlmUsage ? 'false' : 'true');
 		detailPanel.hidden = !(showIssues || showMatrix);
 		mainContainer.hidden = currentTab === 'mlTraining';
 		if (!showMatrix) {
@@ -1624,6 +1669,8 @@
 				} else {
 					issueSummary.textContent = 'Run IssueTriage assessments on open issues to populate the matrix.';
 				}
+			} else if (currentTab === 'llmUsage') {
+				issueSummary.textContent = 'Monitor AI model usage and token consumption tracked by UsageTap.';
 			} else {
 				issueSummary.textContent = '';
 			}

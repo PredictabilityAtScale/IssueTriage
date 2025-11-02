@@ -13,6 +13,7 @@ import type { IssueSummary } from './services/githubClient';
 import { IssueManager, FilterState, NewIssueDraftInput, NewIssueAnalysisResult, NewIssueSimilarityMatch } from './issueManager';
 import { IssueTreeProvider } from './issueTreeProvider';
 import { SidebarMatrixView } from './sidebarMatrixView';
+import { UsageTapView } from './usageTapView';
 import { AssessmentStorage } from './services/assessmentStorage';
 import { AssessmentService, AssessmentError } from './services/assessmentService';
 import { CliToolService } from './services/cliToolService';
@@ -74,7 +75,7 @@ export function activate(context: vscode.ExtensionContext) {
 	services.telemetry.trackEvent('extension.activate');
 
 	console.log('[IssueTriage] Creating UsageTap service...');
-	const usageTap = new UsageTapService(settings, services.telemetry);
+		const usageTap = new UsageTapService(settings, services.telemetry);
 	services.usageTap = usageTap;
 	context.subscriptions.push(usageTap);
 
@@ -166,6 +167,15 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('issuetriage.matrixOverview', sidebarMatrixView)
 	);
+
+	const usageTapView = new UsageTapView(usageTap);
+	context.subscriptions.push(usageTapView);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider('issuetriage.usageView', usageTapView)
+	);
+	void usageTap.ensureCustomerProvisioned().catch(error => {
+		console.warn('[IssueTriage] Failed to provision UsageTap customer during activation:', error);
+	});
 
 	const openPanel = vscode.commands.registerCommand('issuetriage.openPanel', () => {
 		IssueTriagePanel.createOrShow(services);
@@ -760,11 +770,11 @@ class IssueTriagePanel {
 
 	private getHtmlForWebview(webview: vscode.Webview): string {
 		const nonce = getNonce();
-		const csp = `default-src 'none'; img-src ${webview.cspSource} https:; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
+		const csp = `default-src 'none'; img-src ${webview.cspSource} https:; style-src ${webview.cspSource} 'nonce-${nonce}' 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource}; frame-src https://usagetap.com;`;
 
 		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.services.extensionUri, 'src', 'webview', 'panel.js'));
 		const styles = this.getStyles(nonce);
-		const bodyContent = this.getBodyContent();
+		const bodyContent = this.getBodyContent(nonce);
 
 		return `<!DOCTYPE html>
 		<html lang="en">
@@ -793,8 +803,8 @@ class IssueTriagePanel {
 				body {
 					margin: 0;
 					padding: 0;
-					background: var(--vscode-editor-background);
-					color: var(--vscode-editor-foreground);
+					background: var(--vscode-editor-background, #1e1e1e);
+					color: var(--vscode-editor-foreground, #cccccc);
 				}
 
 				.visually-hidden {
@@ -972,50 +982,49 @@ class IssueTriagePanel {
 				position: relative;
 			}
 
-			.issue-list-panel[hidden],
-			.matrix-panel[hidden],
-			.detail-panel[hidden] {
-				display: none;
-			}
+		.issue-list-panel[hidden],
+		.matrix-panel[hidden],
+		.llm-usage-panel[hidden],
+		.detail-panel[hidden] {
+			display: none;
+		}
 
-			.analysis-actions {
-				display: flex;
-				justify-content: flex-end;
-				align-items: center;
-			}
+		.analysis-actions {
+			display: flex;
+			justify-content: flex-end;
+			align-items: center;
+		}
 
-			.analysis-actions[hidden] {
-				display: none;
-			}
+		.analysis-actions[hidden] {
+			display: none;
+		}
 
-			.overview-grid {
-				display: grid;
-				gap: 12px;
-				grid-template-columns: repeat(auto-fit, minmax(clamp(100px, 22vw, 160px), 1fr));
-			}
+		.overview-grid {
+			display: grid;
+			gap: 12px;
+			grid-template-columns: repeat(auto-fit, minmax(clamp(100px, 22vw, 160px), 1fr));
+		}
 
-			.overview-card {
-				border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
-				border-radius: 6px;
-				padding: 12px;
-				background: color-mix(in srgb, var(--vscode-editor-background) 93%, var(--vscode-button-background) 7%);
-			}
+		.overview-card {
+			border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+			border-radius: 6px;
+			padding: 12px;
+			background: color-mix(in srgb, var(--vscode-editor-background) 93%, var(--vscode-button-background) 7%);
+		}
 
-			.overview-card h3 {
-				margin: 0;
-				font-size: 13px;
-				text-transform: uppercase;
-				letter-spacing: 0.05em;
-				color: var(--vscode-descriptionForeground, var(--vscode-foreground));
-			}
+		.overview-card h3 {
+			margin: 0;
+			font-size: 13px;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+		}
 
-			.overview-value {
-				font-size: 24px;
-				font-weight: 600;
-				margin: 8px 0 4px;
-			}
-
-			.overview-subtitle {
+		.overview-value {
+			font-size: 24px;
+			font-weight: 600;
+			margin: 8px 0 4px;
+		}			.overview-subtitle {
 				margin: 0;
 				font-size: 12px;
 				color: var(--vscode-descriptionForeground, var(--vscode-foreground));
@@ -1922,11 +1931,49 @@ class IssueTriagePanel {
 					font-size: 13px;
 				}
 
-				body.new-issue-open {
-					overflow: hidden;
+			.llm-usage-panel {
+				padding: 24px;
+				overflow-y: auto;
+				grid-column: 1 / -1;
+			}				.llm-usage-content {
+					display: flex;
+					flex-direction: column;
+					gap: 16px;
 				}
 
-				.new-issue-overlay {
+				.llm-usage-content h2 {
+					margin: 0 0 8px 0;
+					font-size: 20px;
+					font-weight: 600;
+				}
+
+				.usage-description {
+					margin: 0 0 16px 0;
+					font-size: 13px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+			.usagetap-widget {
+				width: 100%;
+				min-height: 420px;
+				border-radius: 12px;
+				border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+				overflow: hidden;
+				background: var(--vscode-editor-background);
+			}
+
+			/* Override UsageTap widget styles to match VS Code theme */
+			.usagetap-widget iframe {
+				display: block;
+				width: 100%;
+				height: 800px;
+				border: 0;
+				background: transparent;
+			}
+
+			body.new-issue-open {
+				overflow: hidden;
+			}				.new-issue-overlay {
 					position: fixed;
 					inset: 0;
 					display: none;
@@ -2340,7 +2387,11 @@ class IssueTriagePanel {
 			</style>`;
 	}
 
-	private getBodyContent(): string {
+	private getBodyContent(nonce: string): string {
+		const usageCustomerId = encodeURIComponent(this.services.usageTap.getCustomerId());
+		const usageIframeSrc = `https://usagetap.com/embed-api/render?api_key=ek-5p6ZQVeedlbzFRO5xN1YBlLtMihH9svY85fVKZQiOng&organization_id=dbc2357b-7ab0-4a5e-af23-4bd114afc044&customer_id=${usageCustomerId}&type=usage&format=compact&theme=auto&background=transparent&metrics=premiumCalls,standardCalls`;
+		const callsIframeSrc = `https://usagetap.com/embed-api/render?api_key=ek-5p6ZQVeedlbzFRO5xN1YBlLtMihH9svY85fVKZQiOng&organization_id=dbc2357b-7ab0-4a5e-af23-4bd114afc044&customer_id=${usageCustomerId}&type=calls&format=detailed&theme=auto&background=transparent&pageSize=20&layout=grid&height=800px`;
+
 		return `<div class="header">
 				<div class="header-left">
 					<h1>Issue Triage</h1>
@@ -2389,6 +2440,7 @@ class IssueTriagePanel {
 				<button class="state-tab" id="closedTab" aria-pressed="false">Closed</button>
 				<button class="state-tab" id="unlinkedTab" aria-pressed="false">Unlinked</button>
 				<button class="state-tab" id="matrixTab" aria-pressed="false">Matrix</button>
+				<button class="state-tab" id="llmUsageTab" aria-pressed="false">LLM Usage</button>
 				<button class="state-tab" id="mlTrainingTab" aria-pressed="false" hidden>ML Training</button>
 			</div>
 			<div class="container" id="mainContainer">
@@ -2408,6 +2460,28 @@ class IssueTriagePanel {
 					</div>
 					<div id="readinessMatrixEmpty" class="matrix-empty" hidden>Run IssueTriage on open issues to populate this matrix.</div>
 					<p class="matrix-footnote">Readiness uses the composite IssueTriage score; business value comes directly from assessments.</p>
+				</div>
+				<div id="llmUsagePanel" class="llm-usage-panel" aria-label="LLM Usage" hidden>
+					<div class="llm-usage-content">
+						<header class="llm-usage-header">
+							<h2>LLM Usage Tracking</h2>
+							<p class="usage-description">Monitor aggregate usage metrics and inspect detailed call activity captured by UsageTap.</p>
+						</header>
+						<section class="llm-usage-section" aria-labelledby="llmUsageCallsHeading">
+							<h3 id="llmUsageCallsHeading">Call Details</h3>
+							<p class="usage-description">Review granular call logs to understand which features are driving usage.</p>
+							<!-- UsageTap Call Details Widget (iframe) -->
+							<div class="usagetap-widget">
+								<iframe src="${callsIframeSrc}"
+									width="100%"
+									height="800px"
+									frameborder="0"
+									style="background: transparent; background-color: transparent; border-radius: 12px;">
+									allowtransparency="true"
+								</iframe>
+							</div>
+						</section>
+					</div>
 				</div>
 				<div class="issue-list-panel" aria-label="Issue list and overview" id="issuesPanel">
 					<div id="issueSummary" class="meta-row" role="status" aria-live="polite"></div>

@@ -103,6 +103,13 @@
           "contextualTitle": "Opportunity Mix",
           "type": "webview",
           "icon": "resources/icon.svg"
+        },
+        {
+          "id": "issuetriage.usageView",
+          "name": "LLM Usage",
+          "contextualTitle": "LLM Usage",
+          "type": "webview",
+          "icon": "resources/icon.svg"
         }
       ]
     },
@@ -143,16 +150,6 @@
           "type": "boolean",
           "default": true,
           "description": "Enable IssueTriage telemetry collection to improve automation readiness insights."
-        },
-        "issuetriage.telemetry.usagetapKey": {
-          "type": "string",
-          "default": "ek-btNBcPLtj7iGrTduOP4I6bxbJhEWXMaNkpJBNfVIYuM",
-          "markdownDescription": "UsageTap API key used to record LLM usage events. Prefer the `ISSUETRIAGE_USAGETAP_KEY` environment variable when available."
-        },
-        "issuetriage.telemetry.usagetapBaseUrl": {
-          "type": "string",
-          "default": "https://api.usagetap.com",
-          "markdownDescription": "Override the UsageTap API base URL for staging or self-hosted deployments. Can be set via `ISSUETRIAGE_USAGETAP_BASE_URL`."
         },
         "issuetriage.telemetry.usagetapDebug": {
           "type": "boolean",

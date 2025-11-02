@@ -43,7 +43,8 @@ export interface UsageTapServiceOverrides {
 	clientFactory?: () => UsageTapClient;
 }
 
-const DEFAULT_BASE_URL = 'https://api.usagetap.com/';
+const USAGETAP_EMBEDDED_KEY = 'ek-btNBcPLtj7iGrTduOP4I6bxbJhEWXMaNkpJBNfVIYuM';
+const USAGETAP_BASE_URL = 'https://api.usagetap.com/';
 const DEFAULT_TAGS = ['issuetriage', 'vscode-extension'];
 
 export class UsageTapService implements vscode.Disposable {
@@ -82,6 +83,34 @@ export class UsageTapService implements vscode.Disposable {
 		this.customerProvisionPromise = undefined;
 		this.debug('UsageTap service disposed');
 		this.debugChannel?.dispose();
+	}
+
+	public getCustomerId(): string {
+		return this.customerId;
+	}
+
+	public async ensureCustomerProvisioned(): Promise<boolean> {
+		if (!this.isEnabled() || this.disposed) {
+			this.debug('ensureCustomerProvisioned skipped', { enabled: this.isEnabled(), disposed: this.disposed });
+			return false;
+		}
+
+		if (this.customerProvisioned) {
+			return true;
+		}
+
+		const skipProvisioning = process.env.ISSUETRIAGE_USAGETAP_SKIP_PROVISION === 'true';
+		if (skipProvisioning) {
+			this.debug('ensureCustomerProvisioned skipping (SKIP_PROVISION=true)');
+			return true;
+		}
+
+		const client = await this.ensureClient();
+		if (!client) {
+			return false;
+		}
+
+		return this.ensureCustomer(client);
 	}
 
 	public async runWithUsage<T>(options: UsageTapCallOptions, handler: UsageTapHandler<T>): Promise<T> {
@@ -226,13 +255,12 @@ export class UsageTapService implements vscode.Disposable {
 
 		const creation = (async () => {
 			this.debug('ensureClient starting client creation');
-			const apiKey = this.settings.getWithEnvFallback('telemetry.usagetapKey', 'ISSUETRIAGE_USAGETAP_KEY');
-			if (!apiKey) {
-				this.debug('ensureClient aborted: missing API key');
+			const apiKey = USAGETAP_EMBEDDED_KEY;
+			if (!apiKey || apiKey.trim().length === 0) {
+				this.debug('ensureClient aborted: missing embedded API key');
 				return null;
 			}
-			const baseUrlRaw = this.settings.getWithEnvFallback('telemetry.usagetapBaseUrl', 'ISSUETRIAGE_USAGETAP_BASE_URL');
-			const baseUrl = UsageTapService.normalizeBaseUrl(baseUrlRaw ?? DEFAULT_BASE_URL);
+			const baseUrl = USAGETAP_BASE_URL;
 			const defaultTags = DEFAULT_TAGS;
 			const configDebug = {
 				baseUrl,
@@ -351,24 +379,12 @@ export class UsageTapService implements vscode.Disposable {
 
 	private static resolveCustomerId(): string {
 		const machineId = vscode.env.machineId?.trim();
-		if (machineId) {
-			return machineId;
-		}
-		const sessionId = vscode.env.sessionId?.trim();
-		if (sessionId) {
-			return sessionId;
-		}
-		return `anonymous-${Date.now()}`;
+		return machineId && machineId.length > 0 ? machineId : 'unknown';
 	}
 
 	private static resolveFriendlyCustomerName(): string {
 		const appName = vscode.env.appName?.trim();
 		return appName && appName.length > 0 ? appName : 'VS Code';
-	}
-
-	private static normalizeBaseUrl(baseUrl: string): string {
-		const trimmed = baseUrl.trim();
-		return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 	}
 
 	private static readNumber(value: unknown): number | undefined {

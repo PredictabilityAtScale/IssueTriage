@@ -78,6 +78,7 @@ interface DashboardMetrics {
 	assessmentsLastSevenDays: number;
 	readinessDistribution: Record<AssessmentReadiness, number>;
 }
+type OpenIssueCacheFilters = Pick<FilterState, 'label' | 'assignee' | 'milestone' | 'search'>;
 
 interface ResolvedUnlinkedRecord {
 	pulls: number[];
@@ -191,9 +192,11 @@ export class IssueManager implements vscode.Disposable {
 		questionResponses: {}
 	};
 	private allIssues: IssueSummary[] = [];
+	private openIssueCache: Record<string, IssueSummary[]> = {};
+	private openIssueCacheFilters: Record<string, OpenIssueCacheFilters> = {};
 	private disposables: vscode.Disposable[] = [];
 	private resolvedUnlinked: ResolvedUnlinkedState = {};
- 	private questionResponsesStore: StoredQuestionResponses = {};
+	private questionResponsesStore: StoredQuestionResponses = {};
 
 	constructor(
 		private readonly auth: GitHubAuthService,
@@ -205,15 +208,15 @@ export class IssueManager implements vscode.Disposable {
 		private readonly assessment: AssessmentService,
 		private readonly keywordExtractor: KeywordExtractionService,
 		private readonly similarity: SimilarityService
-		) {
+	) {
 		const riskSubscription = this.risk.onDidUpdate(event => this.onRiskUpdate(event));
 		this.disposables.push(riskSubscription);
 		this.resolvedUnlinked = this.stateService.getWorkspace<ResolvedUnlinkedState>(WORKSPACE_RESOLVED_UNLINKED_KEY, {}) ?? {};
 		this.questionResponsesStore = this.stateService.getWorkspace<StoredQuestionResponses>(WORKSPACE_QUESTION_RESPONSES_KEY, {}) ?? {};
 	}
 
-		public readonly onDidChangeState = this.emitter.event;
-		private workspaceRepositorySlug?: string;
+	public readonly onDidChangeState = this.emitter.event;
+	private workspaceRepositorySlug?: string;
 
 	public async initialize(): Promise<void> {
 		try {
@@ -252,6 +255,28 @@ export class IssueManager implements vscode.Disposable {
 		return { ...this.state };
 	}
 
+	public getCachedOpenIssues(): IssueSummary[] {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			return [];
+		}
+		const key = this.getResolvedStoreKey(repository);
+		const cached = this.openIssueCache[key];
+		if (cached) {
+			return [...cached];
+		}
+		if (this.state.filters.state !== 'closed') {
+			return this.state.issues
+				.filter(issue => issue.state === 'open')
+				.map(issue => ({ ...issue }));
+		}
+		return [];
+	}
+
+	public getAllIssues(): IssueSummary[] {
+		return [...this.allIssues];
+	}
+
 	public async connectRepository(): Promise<void> {
 		try {
 			if (!(await this.auth.hasValidSession())) {
@@ -288,7 +313,7 @@ export class IssueManager implements vscode.Disposable {
 		this.setLoading(true);
 		try {
 			const fullName = this.state.selectedRepository.fullName;
-			const filters = this.state.filters;
+			const filters: FilterState = { ...this.state.filters };
 			const issues = await this.github.listIssues(fullName, {
 				label: filters.label,
 				assignee: filters.assignee,
@@ -296,6 +321,11 @@ export class IssueManager implements vscode.Disposable {
 				state: filters.state
 			}, forceRefresh);
 			this.allIssues = issues;
+			if (filters.state === 'closed') {
+				await this.ensureOpenIssueCache(fullName, filters, forceRefresh);
+			} else {
+				this.cacheOpenIssues(fullName, issues, filters);
+			}
 			await this.updateAssessmentData(fullName);
 			this.applyFilters();
 			await this.updateRiskSummaries(fullName);
@@ -620,6 +650,8 @@ export class IssueManager implements vscode.Disposable {
 			questionResponses: {}
 		};
 		this.allIssues = [];
+		this.openIssueCache = {};
+		this.openIssueCacheFilters = {};
 		this.resolvedUnlinked = {};
 		await this.stateService.updateWorkspace(WORKSPACE_REPOSITORY_KEY, undefined);
 		await this.stateService.updateWorkspace(WORKSPACE_FILTER_KEY, undefined);
@@ -1031,6 +1063,48 @@ export class IssueManager implements vscode.Disposable {
 
 	private uniqueValues(values: string[]): string[] {
 		return Array.from(new Set(values.filter(Boolean)));
+	}
+
+	private cacheOpenIssues(repository: string, issues: IssueSummary[], filters: FilterState): void {
+		const key = this.getResolvedStoreKey(repository);
+		this.openIssueCache[key] = issues
+			.filter(issue => issue.state === 'open')
+			.map(issue => ({ ...issue }));
+		this.openIssueCacheFilters[key] = {
+			label: filters.label,
+			assignee: filters.assignee,
+			milestone: filters.milestone,
+			search: filters.search
+		};
+	}
+
+	private async ensureOpenIssueCache(repository: string, filters: FilterState, forceRefresh: boolean): Promise<void> {
+		const key = this.getResolvedStoreKey(repository);
+		const cachedFilters = this.openIssueCacheFilters[key];
+		const hasCachedIssues = Array.isArray(this.openIssueCache[key]);
+		const filtersMatch = cachedFilters
+			&& (cachedFilters.label ?? '') === (filters.label ?? '')
+			&& (cachedFilters.assignee ?? '') === (filters.assignee ?? '')
+			&& (cachedFilters.milestone ?? '') === (filters.milestone ?? '')
+			&& (cachedFilters.search ?? '') === (filters.search ?? '');
+		if (hasCachedIssues && filtersMatch && !forceRefresh) {
+			return;
+		}
+		try {
+			const openIssues = await this.github.listIssues(repository, {
+				label: filters.label,
+				assignee: filters.assignee,
+				milestone: filters.milestone,
+				state: 'open'
+			}, forceRefresh);
+			this.cacheOpenIssues(repository, openIssues, { ...filters, state: 'open' });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.openCache.refreshFailed', {
+				repository,
+				message
+			});
+		}
 	}
 
 	private async markPullRequestResolved(repository: string, pullNumber: number): Promise<void> {

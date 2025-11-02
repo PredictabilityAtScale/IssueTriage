@@ -94,25 +94,29 @@ class StubUsageTapClient {
 }
 
 suite('UsageTapService', () => {
-	test('runWithUsage falls back when API key missing', async () => {
-		const settings = new MockSettings({ 'telemetry.enabled': true });
+	test('runWithUsage falls back when telemetry disabled', async () => {
+		const settings = new MockSettings({ 'telemetry.enabled': false });
 		const telemetry = new MockTelemetry();
-		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService);
+		let factoryInvoked = false;
+		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService, {
+			clientFactory: () => {
+				factoryInvoked = true;
+				return new StubUsageTapClient() as unknown as UsageTapClient;
+			}
+		});
 		let invoked = false;
 		await service.runWithUsage({ feature: 'test.noop' }, async hooks => {
 			invoked = true;
 			hooks.setUsage({ inputTokens: 5 });
 			return 'ok';
 		});
-		assert.ok(invoked, 'handler should execute even without UsageTap credentials');
+		assert.ok(invoked, 'handler should execute even when telemetry is disabled');
+		assert.strictEqual(factoryInvoked, false, 'client factory should not run when telemetry disabled');
 		assert.strictEqual(telemetry.events.length, 0);
 	});
 
 	test('runWithUsage delegates to UsageTap client when configured', async () => {
-		const settings = new MockSettings({
-			'telemetry.enabled': true,
-			'telemetry.usagetapKey': 'test-key'
-		});
+		const settings = new MockSettings({ 'telemetry.enabled': true });
 		const telemetry = new MockTelemetry();
 		const client = new StubUsageTapClient();
 		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService, {
@@ -132,10 +136,7 @@ suite('UsageTapService', () => {
 	});
 
 	test('runWithUsage records vendor error when handler throws', async () => {
-		const settings = new MockSettings({
-			'telemetry.enabled': true,
-			'telemetry.usagetapKey': 'ek-btNBcPLtj7iGrTduOP4I6bxbJhEWXMaNkpJBNfVIYuM'
-		});
+		const settings = new MockSettings({ 'telemetry.enabled': true });
 		const telemetry = new MockTelemetry();
 		const client = new StubUsageTapClient();
 		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService, {
