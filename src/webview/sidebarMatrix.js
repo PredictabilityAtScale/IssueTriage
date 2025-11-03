@@ -1,12 +1,40 @@
 // @ts-check
 (function() {
-	const vscode = (/** @type {any} */ (window)).acquireVsCodeApi();
-	const svg = requireSvgElement('sidebarMatrixSvg');
-	const wrapper = requireElement('sidebarMatrixWrapper');
-	const emptyState = requireElement('sidebarMatrixEmpty');
-	const legendContainer = requireElement('sidebarMatrixLegend');
-	const infoPanel = requireElement('sidebarMatrixInfo');
-	const MATRIX_MIDPOINT = 50;
+	try {
+		const vscode = (/** @type {any} */ (window)).acquireVsCodeApi();
+		
+		/**
+		 * @param {string} id
+		 * @returns {HTMLElement}
+		 */
+		function requireElement(id) {
+			const element = document.getElementById(id);
+			if (!(element instanceof HTMLElement)) {
+				console.error('[IssueTriage] Missing expected element #' + id);
+				throw new Error('Missing expected element #' + id);
+			}
+			return element;
+		}
+
+		/**
+		 * @param {string} id
+		 * @returns {SVGSVGElement}
+		 */
+		function requireSvgElement(id) {
+			const element = document.getElementById(id);
+			if (!(element instanceof SVGSVGElement)) {
+				console.error('[IssueTriage] Missing expected SVG element #' + id);
+				throw new Error('Missing expected SVG element #' + id);
+			}
+			return element;
+		}
+		
+		const svg = requireSvgElement('sidebarMatrixSvg');
+		const wrapper = requireElement('sidebarMatrixWrapper');
+		const emptyState = requireElement('sidebarMatrixEmpty');
+		const legendContainer = requireElement('sidebarMatrixLegend');
+		const infoPanel = requireElement('sidebarMatrixInfo');
+		const MATRIX_MIDPOINT = 50;
 	/** @type {Map<number, any>} */
 	const pointLookup = new Map();
 
@@ -177,30 +205,6 @@
 	}
 
 	/**
-	 * @param {string} id
-	 * @returns {HTMLElement}
-	 */
-	function requireElement(id) {
-		const element = document.getElementById(id);
-		if (!(element instanceof HTMLElement)) {
-			throw new Error('Missing expected element #' + id);
-		}
-		return element;
-	}
-
-	/**
-	 * @param {string} id
-	 * @returns {SVGSVGElement}
-	 */
-	function requireSvgElement(id) {
-		const element = document.getElementById(id);
-		if (!(element instanceof SVGSVGElement)) {
-			throw new Error('Missing expected SVG element #' + id);
-		}
-		return element;
-	}
-
-	/**
 	 * @param {SVGCircleElement} circle
 	 */
 	function openMatrixPoint(circle) {
@@ -237,5 +241,13 @@
 			.replace(/>/g, '&gt;')
 			.replace(/"/g, '&quot;')
 			.replace(/'/g, '&#39;');
+	}
+	} catch (error) {
+		console.error('[IssueTriage] Fatal error initializing sidebar matrix:', error);
+		const err = /** @type {Error} */ (error);
+		console.error('[IssueTriage] Error stack:', err && err.stack ? err.stack : 'No stack trace');
+		// Display error in the UI
+		const errorMessage = err && err.message ? err.message : String(error);
+		document.body.innerHTML = '<div style="padding: 12px; color: var(--vscode-errorForeground, #f48771); font-size: 11px;"><strong>Sidebar Matrix Error</strong><p>' + errorMessage + '</p></div>';
 	}
 })();

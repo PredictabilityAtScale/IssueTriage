@@ -1,40 +1,43 @@
 // @ts-check
 (function() {
-	const vscodeApi = (/** @type {any} */ (window)).acquireVsCodeApi();
+	// Wrap everything in a try-catch to prevent silent failures
+	try {
+		const vscodeApi = (/** @type {any} */ (window)).acquireVsCodeApi();
 
-	(function syncThemeSurface() {
-		try {
-			const computed = getComputedStyle(document.documentElement);
-			const editorBg = (computed.getPropertyValue('--vscode-editor-background') || '').trim();
-			if (editorBg) {
-				document.body.style.background = editorBg;
-			} else {
+		(function syncThemeSurface() {
+			try {
+				const computed = getComputedStyle(document.documentElement);
+				const editorBg = (computed.getPropertyValue('--vscode-editor-background') || '').trim();
+				if (editorBg) {
+					document.body.style.background = editorBg;
+				} else {
+					document.body.style.background = '#1e1e1e';
+				}
+				const fg = (computed.getPropertyValue('--vscode-editor-foreground')
+					|| computed.getPropertyValue('--vscode-foreground')
+					|| '').trim();
+				if (fg) {
+					document.body.style.color = fg;
+				}
+			} catch (error) {
+				console.warn('[IssueTriage] Failed to sync webview theme surface', error);
 				document.body.style.background = '#1e1e1e';
 			}
-			const fg = (computed.getPropertyValue('--vscode-editor-foreground')
-				|| computed.getPropertyValue('--vscode-foreground')
-				|| '').trim();
-			if (fg) {
-				document.body.style.color = fg;
-			}
-		} catch (error) {
-			console.warn('[IssueTriage] Failed to sync webview theme surface', error);
-			document.body.style.background = '#1e1e1e';
-		}
-	}());
+		}());
 
-	/**
-	 * @template {HTMLElement} T
-	 * @param {string} id
-	 * @returns {T}
-	 */
-	function requireElement(id) {
-		const element = document.getElementById(id);
-		if (!element) {
-			throw new Error('Missing expected element #' + id);
+		/**
+		 * @template {HTMLElement} T
+		 * @param {string} id
+		 * @returns {T}
+		 */
+		function requireElement(id) {
+			const element = document.getElementById(id);
+			if (!element) {
+				console.error('[IssueTriage] Missing expected element #' + id);
+				throw new Error('Missing expected element #' + id);
+			}
+			return /** @type {T} */ (element);
 		}
-		return /** @type {T} */ (element);
-	}
 
 	/**
 	 * @param {string} id
@@ -1493,7 +1496,10 @@
 		} = state;
 
 		connectButton.disabled = loading;
-		connectButton.textContent = session ? 'Sign Out' : 'Connect';
+		const connecting = loading && !session;
+		const connectLabel = connecting ? 'Connecting…' : (session ? 'Sign Out' : 'Connect to GitHub');
+		connectButton.textContent = connectLabel;
+		connectButton.setAttribute('aria-label', connectLabel);
 		refreshButton.disabled = loading || !selectedRepository;
 		openNewIssueButton.disabled = loading || !selectedRepository;
 		openNewIssueButton.setAttribute('aria-disabled', openNewIssueButton.disabled ? 'true' : 'false');
@@ -3180,5 +3186,13 @@
 		}
 	}
 
-	vscodeApi.postMessage({ type: 'webview.ready' });
+		vscodeApi.postMessage({ type: 'webview.ready' });
+	} catch (error) {
+		console.error('[IssueTriage] Fatal error initializing webview:', error);
+		const err = /** @type {Error} */ (error);
+		console.error('[IssueTriage] Error stack:', err && err.stack ? err.stack : 'No stack trace');
+		// Display error in the UI
+		const errorMessage = err && err.message ? err.message : String(error);
+		document.body.innerHTML = '<div style="padding: 20px; color: var(--vscode-errorForeground, #f48771);"><h2>Issue Triage Panel Error</h2><p>Failed to initialize the Issue Triage panel. Check the developer console for details.</p><p><strong>Error:</strong> ' + errorMessage + '</p></div>';
+	}
 })();

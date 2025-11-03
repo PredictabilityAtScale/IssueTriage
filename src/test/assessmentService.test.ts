@@ -127,7 +127,9 @@ suite('AssessmentService', () => {
 
 	test('throws when API key is missing', async () => {
 		const storage = new MockAssessmentStorage();
-		const settings = new MockSettingsService({});
+		const settings = new MockSettingsService({
+			'assessment.llmMode': 'local'
+		});
 		const telemetry = new MockTelemetryService();
 		const github = new MockGitHubClient();
 		const cli = new MockCliToolService();

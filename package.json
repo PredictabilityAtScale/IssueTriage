@@ -3,13 +3,13 @@
   "displayName": "IssueTriage",
   "description": "An automated issue triage for risk and readiness assessment",
   "publisher": "PredictabilityAtScale",
-  "version": "0.0.1",
+  "version": "0.0.9",
   "repository": {
     "type": "git",
     "url": "https://github.com/PredictabilityAtScale/IssueTriage.git"
   },
   "engines": {
-    "vscode": "^1.105.0"
+    "vscode": "^1.95.0"
   },
   "categories": [
     "Other"
@@ -29,7 +29,8 @@
       {
         "command": "issuetriage.connectRepository",
         "title": "Issue Triage: Connect Repository",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(plug)"
       },
       {
         "command": "issuetriage.changeRepository",
@@ -115,6 +116,12 @@
     },
     "menus": {
       "view/title": [
+        {
+          "command": "issuetriage.connectRepository",
+          "when": "view == issuetriage.issuesView && (!issuetriage.hasSession || !issuetriage.hasRepository)",
+          "group": "navigation@0",
+          "icon": "$(plug)"
+        },
         {
           "command": "issuetriage.openPanel",
           "when": "view == issuetriage.issuesView",
@@ -330,14 +337,14 @@
   "dependencies": {
     "@octokit/core": "^6.1.2",
     "@octokit/plugin-paginate-rest": "^11.4.0",
-    "@usagetap/sdk": "^0.6.0",
+    "@usagetap/sdk": "^0.7.1",
     "dotenv": "^16.4.5",
     "sql.js": "^1.9.0"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "22.x",
-    "@types/vscode": "^1.105.0",
+    "@types/vscode": "^1.95.0",
     "@typescript-eslint/eslint-plugin": "^8.45.0",
     "@typescript-eslint/parser": "^8.45.0",
     "@vscode/test-cli": "^0.0.11",

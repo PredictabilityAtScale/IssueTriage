@@ -54,13 +54,13 @@ export class IssueTreeProvider implements vscode.TreeDataProvider<TreeItem> {
 			}
 			
 			if (!snapshot.selectedRepository) {
-				return [
-					new TreeItem('No repository connected', vscode.TreeItemCollapsibleState.None, 'info'),
-					new TreeItem('Click to connect', vscode.TreeItemCollapsibleState.None, 'action', {
-						command: 'issuetriage.connectRepository',
-						title: 'Connect Repository'
-					})
-				];
+				const infoItem = new TreeItem('No repository connected', vscode.TreeItemCollapsibleState.None, 'info');
+				const connectItem = new TreeItem('Connect to GitHub', vscode.TreeItemCollapsibleState.None, 'action', {
+					command: 'issuetriage.connectRepository',
+					title: 'Connect Repository'
+				}, 'Authenticate with GitHub and choose a repository');
+				connectItem.iconPath = new vscode.ThemeIcon('plug');
+				return [infoItem, connectItem];
 			}
 
 			const items: TreeItem[] = [];

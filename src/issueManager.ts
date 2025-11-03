@@ -278,30 +278,38 @@ export class IssueManager implements vscode.Disposable {
 	}
 
 	public async connectRepository(): Promise<void> {
+		this.setLoading(true);
 		try {
 			if (!(await this.auth.hasValidSession())) {
 				await this.auth.signIn();
-				this.state.session = await this.auth.getSessionMetadata();
 			}
+			this.state.session = await this.auth.getSessionMetadata();
+			this.emitState();
 			await this.refreshRepositories(true);
 			if (!this.state.selectedRepository) {
 				await this.promptForRepository();
 			}
 		} catch (error) {
 			this.handleUserFacingError('Failed to connect to GitHub.', error);
+		} finally {
+			this.setLoading(false);
 		}
 	}
 
 	public async changeRepository(): Promise<void> {
+		this.setLoading(true);
 		try {
 			if (!(await this.auth.hasValidSession())) {
 				await this.auth.signIn();
-				this.state.session = await this.auth.getSessionMetadata();
 			}
+			this.state.session = await this.auth.getSessionMetadata();
+			this.emitState();
 			await this.refreshRepositories(true);
 			await this.promptForRepository();
 		} catch (error) {
 			this.handleUserFacingError('Failed to change repository.', error);
+		} finally {
+			this.setLoading(false);
 		}
 	}
 
@@ -1494,6 +1502,10 @@ export class IssueManager implements vscode.Disposable {
 
 	private emitState(): void {
 		this.state.automationLaunchEnabled = this.readAutomationFlag();
+		const hasSession = Boolean(this.state.session);
+		const hasRepository = Boolean(this.state.selectedRepository);
+		void vscode.commands.executeCommand('setContext', 'issuetriage.hasSession', hasSession);
+		void vscode.commands.executeCommand('setContext', 'issuetriage.hasRepository', hasRepository);
 		this.emitter.fire({
 			...this.state,
 			issues: [...this.state.issues],

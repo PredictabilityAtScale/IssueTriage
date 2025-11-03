@@ -61,7 +61,10 @@ export class SidebarMatrixView implements vscode.WebviewViewProvider, vscode.Dis
 		const webview = webviewView.webview;
 		webview.options = {
 			enableScripts: true,
-			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'src', 'webview')]
+			localResourceRoots: [
+				vscode.Uri.joinPath(this.extensionUri, 'src', 'webview'),
+				vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview')
+			]
 		};
 		webview.html = this.getHtml(webview);
 
@@ -120,6 +123,12 @@ export class SidebarMatrixView implements vscode.WebviewViewProvider, vscode.Dis
 			repository: state.selectedRepository?.fullName,
 			updatedAt: state.lastUpdated
 		};
+		console.log('[IssueTriage] Sidebar matrix dataset', {
+			repository: state.selectedRepository?.fullName ?? 'none',
+			filterState: state.filters?.state ?? 'open',
+			issues: Array.isArray(state.issues) ? state.issues.length : 0,
+			assessed: dataset.length
+		});
 		void this.view.webview.postMessage(payload);
 		this.view.description = dataset.length ? `${dataset.length} assessed` : 'Assess open issues to populate the matrix';
 	}
@@ -173,8 +182,8 @@ export class SidebarMatrixView implements vscode.WebviewViewProvider, vscode.Dis
 	private getHtml(webview: vscode.Webview): string {
 		const nonce = getNonce();
 		const csp = `default-src 'none'; img-src ${webview.cspSource} https:; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};`;
-		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'src', 'webview', 'sidebarMatrix.js'));
-
+		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview', 'sidebarMatrix.js'));
+		
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>

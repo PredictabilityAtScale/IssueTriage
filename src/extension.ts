@@ -748,6 +748,11 @@ class IssueTriagePanel {
 			this.postState(state);
 		});
 		this.disposables.push(this.stateListener);
+		
+		// Send initial state immediately after HTML is set
+		// This ensures the webview has the current state even if webview.ready message is delayed
+		const initialState = this.services.issueManager.getSnapshot();
+		this.postState(initialState);
 	}
 
 	private update() {
@@ -772,7 +777,7 @@ class IssueTriagePanel {
 		const nonce = getNonce();
 		const csp = `default-src 'none'; img-src ${webview.cspSource} https:; style-src ${webview.cspSource} 'nonce-${nonce}' 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource}; frame-src https://usagetap.com;`;
 
-		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.services.extensionUri, 'src', 'webview', 'panel.js'));
+		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.services.extensionUri, 'dist', 'webview', 'panel.js'));
 		const styles = this.getStyles(nonce);
 		const bodyContent = this.getBodyContent(nonce);
 
@@ -2410,7 +2415,7 @@ class IssueTriagePanel {
 					<label class="filter-label" id="repositoryLabel" for="repositorySelect">Repository</label>
 					<div class="repo-controls" role="group" aria-labelledby="repositoryLabel">
 						<select id="repositorySelect" aria-describedby="repositoryHelp"></select>
-						<button id="connect" class="compact-button">Connect</button>
+						<button id="connect" class="compact-button" aria-label="Connect to GitHub">Connect to GitHub</button>
 					</div>
 					<p id="repositoryHelp" class="visually-hidden">Select a repository to load issues for IssueTriage.</p>
 				</div>

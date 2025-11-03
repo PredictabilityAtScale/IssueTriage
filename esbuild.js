@@ -24,6 +24,7 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
+	// Build the extension host code
 	const ctx = await esbuild.context({
 		entryPoints: [
 			'src/extension.ts'
@@ -35,7 +36,7 @@ async function main() {
 		sourcesContent: false,
 		platform: 'node',
 		outfile: 'dist/extension.js',
-		external: ['vscode', '@usagetap/sdk'],
+		external: ['vscode'],
 		loader: {
 			'.wasm': 'file'
 		},
@@ -45,11 +46,33 @@ async function main() {
 			esbuildProblemMatcherPlugin,
 		],
 	});
+
+	// Build the webview scripts (these run in the browser context)
+	const webviewCtx = await esbuild.context({
+		entryPoints: [
+			'src/webview/panel.js',
+			'src/webview/sidebarMatrix.js'
+		],
+		bundle: false,  // Don't bundle - keep as separate files
+		format: 'iife', // Immediately Invoked Function Expression for browser
+		minify: production,
+		sourcemap: !production,
+		platform: 'browser',
+		outdir: 'dist/webview',
+		logLevel: 'silent',
+		plugins: [
+			esbuildProblemMatcherPlugin,
+		],
+	});
+
 	if (watch) {
 		await ctx.watch();
+		await webviewCtx.watch();
 	} else {
 		await ctx.rebuild();
+		await webviewCtx.rebuild();
 		await ctx.dispose();
+		await webviewCtx.dispose();
 	}
 }
 
