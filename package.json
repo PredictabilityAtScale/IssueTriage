@@ -3,7 +3,8 @@
   "displayName": "IssueTriage",
   "description": "An automated issue triage for risk and readiness assessment",
   "publisher": "PredictabilityAtScale",
-  "version": "0.0.9",
+  "version": "0.0.10",
+  "icon": "resources/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/PredictabilityAtScale/IssueTriage.git"
@@ -87,7 +88,7 @@
         {
           "id": "issuetriage",
           "title": "Issue Triage",
-          "icon": "resources/icon.svg"
+          "icon": "resources/icon-activity.svg"
         }
       ]
     },
@@ -103,14 +104,14 @@
           "name": "Opportunity Mix",
           "contextualTitle": "Opportunity Mix",
           "type": "webview",
-          "icon": "resources/icon.svg"
+          "icon": "resources/icon-activity.svg"
         },
         {
           "id": "issuetriage.usageView",
           "name": "LLM Usage",
           "contextualTitle": "LLM Usage",
           "type": "webview",
-          "icon": "resources/icon.svg"
+          "icon": "resources/icon-activity.svg"
         }
       ]
     },

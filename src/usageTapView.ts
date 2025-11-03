@@ -55,7 +55,7 @@ export class UsageTapView implements vscode.WebviewViewProvider, vscode.Disposab
 
 	private getHtml(webview: vscode.Webview): string {
 		const nonce = getNonce();
-		const iframeSrc = `https://usagetap.com/embed-api/render?api_key=ek-5p6ZQVeedlbzFRO5xN1YBlLtMihH9svY85fVKZQiOng&organization_id=dbc2357b-7ab0-4a5e-af23-4bd114afc044&customer_id=${encodeURIComponent(this.customerId)}&type=usage&format=compact&theme=auto&metrics=premiumCalls,standardCalls`;
+		const iframeSrc = `https://usagetap.com/embed-api/render?api_key=ek-5p6ZQVeedlbzFRO5xN1YBlLtMihH9svY85fVKZQiOng&organization_id=dbc2357b-7ab0-4a5e-af23-4bd114afc044&customer_id=${encodeURIComponent(this.customerId)}&type=usage&format=compact&theme=auto&metrics=premiumCalls,standardCalls&refresh=60`;
 		const csp = `default-src 'none'; img-src ${webview.cspSource} https:; style-src ${webview.cspSource} 'unsafe-inline'; frame-src https://usagetap.com; script-src 'nonce-${nonce}';`;
 
 		return `<!DOCTYPE html>
