@@ -291,4 +291,147 @@ suite('AssessmentService', () => {
 		assert.ok(content.includes('Comment 2 by requester'));
 		assert.ok(content.includes('rollout schedule'));
 	});
+
+	test('enforces usage limit in remote mode', async () => {
+		const storage = new MockAssessmentStorage();
+		const settings = new MockSettingsService({
+			'assessment.llmMode': 'remote',
+			'assessment.preferredModel': 'openai/gpt-5-mini',
+			'telemetry.enabled': true
+		});
+		const telemetry = new MockTelemetryService();
+		const github = new MockGitHubClient();
+		const createdAt = '2024-01-01T12:00:00Z';
+		github.issue = {
+			repository: 'owner/repo',
+			number: 42,
+			title: 'Test Issue',
+			url: 'https://github.com/owner/repo/issues/42',
+			labels: [],
+			assignees: [],
+			milestone: undefined,
+			updatedAt: createdAt,
+			createdAt,
+			body: 'Test issue body',
+			author: 'test-user',
+			state: 'open',
+			comments: []
+		};
+		const cli = new MockCliToolService();
+		const risk = new MockRiskService();
+
+		// Create a mock UsageTap service that denies standard calls
+		const mockUsageTap = {
+			runWithUsage: async (options: any, handler: any) => {
+				if (options.enforceStandardLimit) {
+					const { UsageLimitExceededError } = await import('../services/usageTapService.js');
+					throw new UsageLimitExceededError();
+				}
+				return handler({ setUsage: () => {}, setError: () => {} });
+			},
+			resolveRequestedEntitlements: () => ({ standard: true }),
+			extractUsageFromOpenAIResponse: () => undefined
+		};
+
+		const llmGateway = new LlmGateway(settings as unknown as SettingsService);
+		const service = new AssessmentService(
+			storage as unknown as any,
+			settings as unknown as SettingsService,
+			telemetry as unknown as TelemetryService,
+			github as unknown as GitHubClient,
+			cli as unknown as CliToolService,
+			risk as unknown as RiskIntelligenceService,
+			llmGateway,
+			mockUsageTap as any
+		);
+
+		await assert.rejects(
+			async () => {
+				await service.assessIssue('owner/repo', 42);
+			},
+			(error: any) => {
+				assert.strictEqual(error.name, 'AssessmentError');
+				assert.strictEqual(error.code, 'usageLimitExceeded');
+				assert.ok(error.message.includes('Usage limit exceeded'));
+				return true;
+			}
+		);
+	});
+
+	test('does not enforce usage limit in local mode', async () => {
+		const storage = new MockAssessmentStorage();
+		const settings = new MockSettingsService({
+			'assessment.llmMode': 'local',
+			'assessment.preferredModel': 'openai/gpt-5-mini',
+			'telemetry.enabled': true
+		}, {
+			ISSUETRIAGE_OPENROUTER_API_KEY: 'test-key'
+		});
+		const telemetry = new MockTelemetryService();
+		const github = new MockGitHubClient();
+		const createdAt = '2024-01-01T12:00:00Z';
+		github.issue = {
+			repository: 'owner/repo',
+			number: 42,
+			title: 'Test Issue',
+			url: 'https://github.com/owner/repo/issues/42',
+			labels: [],
+			assignees: [],
+			milestone: undefined,
+			updatedAt: createdAt,
+			createdAt,
+			body: 'Test issue body',
+			author: 'test-user',
+			state: 'open',
+			comments: []
+		};
+		const cli = new MockCliToolService();
+		const risk = new MockRiskService();
+
+		const mockResponse = {
+			choices: [
+				{
+					message: {
+						content: '{"summary":"Test summary","scores":{"composite":70,"requirements":75,"complexity":60,"security":65,"business":55},"recommendations":[]}'
+					}
+				}
+			]
+		};
+
+		globalThis.fetch = (async (_input, init) => {
+			return {
+				ok: true,
+				json: async () => mockResponse,
+				text: async () => JSON.stringify(mockResponse)
+			} as Response;
+		}) as FetchLike;
+
+		// Create a mock UsageTap service that tracks if enforceStandardLimit was set
+		let enforceLimitRequested = false;
+		const mockUsageTap = {
+			runWithUsage: async (options: any, handler: any) => {
+				enforceLimitRequested = options.enforceStandardLimit === true;
+				return handler({ setUsage: () => {}, setError: () => {} });
+			},
+			resolveRequestedEntitlements: () => ({ standard: true }),
+			extractUsageFromOpenAIResponse: () => undefined
+		};
+
+		const llmGateway = new LlmGateway(settings as unknown as SettingsService);
+		const service = new AssessmentService(
+			storage as unknown as any,
+			settings as unknown as SettingsService,
+			telemetry as unknown as TelemetryService,
+			github as unknown as GitHubClient,
+			cli as unknown as CliToolService,
+			risk as unknown as RiskIntelligenceService,
+			llmGateway,
+			mockUsageTap as any
+		);
+
+		await service.assessIssue('owner/repo', 42);
+
+		assert.strictEqual(enforceLimitRequested, false, 'should not enforce limit in local mode');
+		assert.ok(storage.saved, 'assessment should be saved successfully');
+	});
 });

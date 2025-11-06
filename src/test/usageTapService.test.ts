@@ -154,4 +154,142 @@ suite('UsageTapService', () => {
 		assert.strictEqual(client.recordedError?.code, 'VENDOR_ERROR');
 		assert.strictEqual(client.recordedUsage, undefined, 'usage should not be recorded when handler fails');
 	});
+
+	test('runWithUsage enforces standard limit when requested', async () => {
+		const settings = new MockSettings({ 'telemetry.enabled': true });
+		const telemetry = new MockTelemetry();
+		const client = new StubUsageTapClient();
+		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService, {
+			customerId: 'customer-123',
+			clientFactory: () => client as unknown as UsageTapClient
+		});
+
+		// Override the stub to return allowed.standard = false
+		const subscription: SubscriptionSnapshot = {
+			id: null,
+			usagePlanVersionId: null,
+			planName: null,
+			planVersion: null,
+			limitType: 'NONE',
+			reasoningLevel: 'NONE',
+			lastReplenishedAt: null,
+			nextReplenishAt: null,
+			subscriptionVersion: null
+		};
+		const hints: EntitlementHints = {
+			suggestedModelTier: 'standard',
+			reasoningLevel: 'NONE',
+			policy: 'NONE'
+		};
+		client.withUsage = async function<T>(beginRequest: Record<string, unknown>, handler: (context: WithUsageContext) => Promise<T>): Promise<T> {
+			this.beginRequests.push({ feature: beginRequest.feature as string | undefined, tags: beginRequest.tags as string[] | undefined });
+			const context: WithUsageContext = {
+				begin: {
+					result: { status: 'ACCEPTED' },
+					correlationId: 'corr',
+					data: {
+						callId: 'call_123',
+						startTime: new Date().toISOString(),
+						newCustomer: false,
+						canceled: false,
+						policy: 'NONE',
+						allowed: { standard: false, premium: false, audio: false, image: false, search: false, reasoningLevel: 'NONE' },
+						entitlementHints: hints,
+						meters: {},
+						remainingRatios: {},
+						subscription
+					}
+				},
+				setUsage: (usage: UsageTapUsagePayload) => {
+					this.recordedUsage = { ...usage };
+				},
+				setError: (error: EndCallRequest['error']) => {
+					this.recordedError = error ?? undefined;
+				}
+			};
+			return handler(context);
+		};
+
+		await assert.rejects(
+			async () => {
+				await service.runWithUsage({ feature: 'assessment.generate', enforceStandardLimit: true }, async () => {
+					return 'should not reach here';
+				});
+			},
+			(error: Error) => {
+				assert.strictEqual(error.name, 'UsageLimitExceededError');
+				assert.ok(error.message.includes('Usage limit exceeded'));
+				return true;
+			}
+		);
+
+		assert.ok(client.recordedError, 'should record limit exceeded error');
+		assert.strictEqual(client.recordedError?.code, 'USAGE_LIMIT_EXCEEDED');
+	});
+
+	test('runWithUsage allows calls when enforceStandardLimit is false', async () => {
+		const settings = new MockSettings({ 'telemetry.enabled': true });
+		const telemetry = new MockTelemetry();
+		const client = new StubUsageTapClient();
+		const service = new UsageTapService(settings as unknown as SettingsService, telemetry as unknown as TelemetryService, {
+			customerId: 'customer-123',
+			clientFactory: () => client as unknown as UsageTapClient
+		});
+
+		// Override the stub to return allowed.standard = false
+		const subscription: SubscriptionSnapshot = {
+			id: null,
+			usagePlanVersionId: null,
+			planName: null,
+			planVersion: null,
+			limitType: 'NONE',
+			reasoningLevel: 'NONE',
+			lastReplenishedAt: null,
+			nextReplenishAt: null,
+			subscriptionVersion: null
+		};
+		const hints: EntitlementHints = {
+			suggestedModelTier: 'standard',
+			reasoningLevel: 'NONE',
+			policy: 'NONE'
+		};
+		client.withUsage = async function<T>(beginRequest: Record<string, unknown>, handler: (context: WithUsageContext) => Promise<T>): Promise<T> {
+			this.beginRequests.push({ feature: beginRequest.feature as string | undefined, tags: beginRequest.tags as string[] | undefined });
+			const context: WithUsageContext = {
+				begin: {
+					result: { status: 'ACCEPTED' },
+					correlationId: 'corr',
+					data: {
+						callId: 'call_123',
+						startTime: new Date().toISOString(),
+						newCustomer: false,
+						canceled: false,
+						policy: 'NONE',
+						allowed: { standard: false, premium: false, audio: false, image: false, search: false, reasoningLevel: 'NONE' },
+						entitlementHints: hints,
+						meters: {},
+						remainingRatios: {},
+						subscription
+					}
+				},
+				setUsage: (usage: UsageTapUsagePayload) => {
+					this.recordedUsage = { ...usage };
+				},
+				setError: (error: EndCallRequest['error']) => {
+					this.recordedError = error ?? undefined;
+				}
+			};
+			return handler(context);
+		};
+
+		// When enforceStandardLimit is not set or false, the call should proceed even when standard is false
+		const result = await service.runWithUsage({ feature: 'assessment.generate', enforceStandardLimit: false }, async (hooks) => {
+			hooks.setUsage({ inputTokens: 100 });
+			return 'success';
+		});
+
+		assert.strictEqual(result, 'success');
+		assert.strictEqual(client.recordedUsage?.inputTokens, 100);
+		assert.strictEqual(client.recordedError, undefined);
+	});
 });

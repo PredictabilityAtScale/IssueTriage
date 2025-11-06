@@ -7,6 +7,7 @@ import { RiskIntelligenceService } from './riskIntelligenceService';
 import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
 import type { RiskSummary } from '../types/risk';
 import type { UsageTapOperationHooks, UsageTapService } from './usageTapService';
+import { UsageLimitExceededError } from './usageTapService';
 
 const COMMENT_TAG = '<!-- IssueTriage Assessment -->';
 
@@ -22,7 +23,7 @@ interface AssessmentModelPayload {
 	recommendations: string[];
 }
 
-export type AssessmentErrorCode = 'missingApiKey' | 'providerError' | 'invalidResponse' | 'storageError';
+export type AssessmentErrorCode = 'missingApiKey' | 'providerError' | 'invalidResponse' | 'storageError' | 'usageLimitExceeded';
 
 export class AssessmentError extends Error {
 	public readonly code: AssessmentErrorCode;
@@ -310,12 +311,23 @@ export class AssessmentService {
 		const idempotency = `assessment:${sanitizedRepo}:${issueNumber}`;
 		const tags = ['assessment', repository];
 
-		return this.usageTap.runWithUsage({
-			feature: 'assessment.generate',
-			requested,
-			tags,
-			idempotency
-		}, async hooks => execute(hooks));
+		// Only enforce standard call limits when using remote mode (no user API key)
+		const enforceStandardLimit = this.llm.getMode() === 'remote';
+
+		try {
+			return await this.usageTap.runWithUsage({
+				feature: 'assessment.generate',
+				requested,
+				tags,
+				idempotency,
+				enforceStandardLimit
+			}, async hooks => execute(hooks));
+		} catch (error) {
+			if (error instanceof UsageLimitExceededError) {
+				throw new AssessmentError('usageLimitExceeded', error.message);
+			}
+			throw error;
+		}
 	}
 
 	private buildModelPayload(issue: IssueDetail): string {

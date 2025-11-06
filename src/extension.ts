@@ -3871,6 +3871,8 @@ function formatAssessmentError(error: unknown): string {
 		switch (error.code) {
 			case 'missingApiKey':
 				return 'OpenRouter API key not configured. Update IssueTriage settings to continue.';
+			case 'usageLimitExceeded':
+				return 'Usage limit exceeded. Please add your own OpenRouter API key in IssueTriage settings to continue.';
 			case 'invalidResponse':
 				return 'The assessment response was invalid. Please retry in a moment.';
 			case 'storageError':

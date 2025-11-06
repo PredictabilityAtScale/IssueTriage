@@ -18,6 +18,7 @@ export interface UsageTapCallOptions {
 	stripeCustomerId?: string;
 	idempotency?: string;
 	withUsageOptions?: WithUsageOptions;
+	enforceStandardLimit?: boolean;
 }
 
 export interface UsageTapOperationHooks {
@@ -47,6 +48,13 @@ const USAGETAP_EMBEDDED_KEY = 'ek-btNBcPLtj7iGrTduOP4I6bxbJhEWXMaNkpJBNfVIYuM';
 const USAGETAP_BASE_URL = 'https://api.usagetap.com/';
 const DEFAULT_TAGS = ['issuetriage', 'vscode-extension'];
 
+export class UsageLimitExceededError extends Error {
+	public constructor(message: string = 'Usage limit exceeded. Please add your own OpenRouter API key in settings to continue.') {
+		super(message);
+		this.name = 'UsageLimitExceededError';
+	}
+}
+
 export class UsageTapService implements vscode.Disposable {
 	private readonly overrides: UsageTapServiceOverrides;
 	private readonly telemetry: TelemetryService;
@@ -73,7 +81,12 @@ export class UsageTapService implements vscode.Disposable {
 		this.debugEnabled = envExplicit ? envEnabled : settingEnabled;
 		if (this.debugEnabled) {
 			this.debugChannel = vscode.window.createOutputChannel('IssueTriage UsageTap');
-			this.debug('UsageTap debug logging enabled', { customerId: this.customerId });
+			this.debug('UsageTap debug logging enabled', { 
+				customerId: this.customerId,
+				machineId: vscode.env.machineId,
+				appName: vscode.env.appName,
+				sessionId: vscode.env.sessionId
+			});
 		}
 	}
 
@@ -159,6 +172,18 @@ export class UsageTapService implements vscode.Disposable {
 
 		this.debug('runWithUsage starting UsageTap call', { feature: options.feature, tags: beginRequest.tags, idempotency: beginRequest.idempotency });
 		return client.withUsage(beginRequest, async (context: WithUsageContext) => {
+			// Check if standard calls are allowed when limit enforcement is requested
+			if (options.enforceStandardLimit) {
+				const allowed = context.begin?.data?.allowed;
+				this.debug('Checking usage limits', { allowed, enforceStandardLimit: options.enforceStandardLimit });
+				if (allowed && allowed.standard === false) {
+					const error = new UsageLimitExceededError();
+					this.debug('Standard call limit exceeded', { feature: options.feature });
+					context.setError({ code: 'USAGE_LIMIT_EXCEEDED', message: error.message });
+					throw error;
+				}
+			}
+
 			let errorCaptured = false;
 			const hooks: UsageTapOperationHooks = {
 				setUsage: usage => {
@@ -178,7 +203,7 @@ export class UsageTapService implements vscode.Disposable {
 				this.debug('Wrapped handler completed', { feature: options.feature });
 				return result;
 			} catch (error) {
-				if (!errorCaptured) {
+				if (!errorCaptured && !(error instanceof UsageLimitExceededError)) {
 					const message = error instanceof Error ? error.message : String(error);
 					this.debug('Wrapped handler threw before UsageTap error was set', { feature: options.feature, message });
 					context.setError({ code: 'VENDOR_ERROR', message });
@@ -319,12 +344,22 @@ export class UsageTapService implements vscode.Disposable {
 			const provision = (async () => {
 				const customerPayload = {
 					customerId: this.customerId,
-					customerFriendlyName: UsageTapService.resolveFriendlyCustomerName()
+					customerFriendlyName: this.customerId
 				};
+				// Always log this to help debug customer duplication
+				console.log('[IssueTriage UsageTap] Creating/updating customer:', {
+					customerId: this.customerId,
+					machineId: vscode.env.machineId,
+					appName: vscode.env.appName
+				});
 				this.debug('ensureCustomer sending request', customerPayload);
 				
 				try {
 					const result = await client.createCustomer(customerPayload);
+					console.log('[IssueTriage UsageTap] Customer provisioned:', {
+						customerId: this.customerId,
+						resultStatus: typeof result === 'object' && result ? (result as any).result?.status : 'unknown'
+					});
 					this.debug('UsageTap customer ensured', { 
 						customerId: this.customerId,
 						result: typeof result === 'object' ? JSON.stringify(result) : String(result)
