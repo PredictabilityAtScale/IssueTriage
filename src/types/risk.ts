@@ -49,6 +49,7 @@ export interface RiskProfile {
 	changeSummary: string;
 	fileChanges: RiskFileChange[];
 	keywords?: string[];
+	commentId?: number;
 }
 
 export interface RiskSummary {

@@ -232,6 +232,11 @@
             "type": "string"
           }
         },
+        "issuetriage.risk.publishComments": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Post or update a single IssueTriage risk intelligence comment on the GitHub issue after each analysis."
+        },
         "issuetriage.cliTools": {
           "type": "array",
           "default": [],

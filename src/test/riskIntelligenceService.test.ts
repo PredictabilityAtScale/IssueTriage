@@ -102,6 +102,11 @@ class FakeGitHubClient {
 		return this.commitDetails.get(key) ?? { files: [] };
 	}
 
+	public async upsertIssueComment(repository: string, issueNumber: number, body: string, commentId?: number): Promise<number | undefined> {
+		// For testing, return a mock comment ID
+		return commentId ?? 999;
+	}
+
 	public static buildIssueDetail(issue: IssueSummary & { body?: string; author?: string }): IssueDetail {
 		return {
 			number: issue.number,

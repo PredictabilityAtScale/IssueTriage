@@ -29,6 +29,7 @@ import type { AssessmentRecord } from './services/assessmentStorage';
 import type { BackfillProgress, RiskSummary, ExportManifest } from './types/risk';
 import { LlmGateway } from './services/llmGateway';
 import { UsageTapService } from './services/usageTapService';
+import { evaluateRecordReadiness } from './services/assessmentReadiness';
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext) {
@@ -1278,6 +1279,66 @@ class IssueTriagePanel {
 					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
 				}
 
+				.unlinked-filters {
+					display: flex;
+					gap: 16px;
+					flex-wrap: wrap;
+					margin-bottom: 16px;
+					padding: 12px;
+					border-radius: 6px;
+					background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-button-background) 4%);
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.25));
+				}
+
+				.unlinked-filters .filter-group {
+					display: flex;
+					align-items: center;
+					gap: 8px;
+				}
+
+				.unlinked-filters label {
+					font-size: 12px;
+					color: var(--vscode-foreground);
+					display: flex;
+					align-items: center;
+					gap: 6px;
+				}
+
+				.unlinked-filters select {
+					padding: 4px 8px;
+					font-size: 12px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: var(--vscode-input-background);
+					color: var(--vscode-input-foreground);
+					cursor: pointer;
+				}
+
+				.unlinked-filters select:hover {
+					border-color: var(--vscode-button-background);
+				}
+
+				.backfill-section header button[data-bulk-create] {
+					margin-top: 8px;
+					padding: 6px 12px;
+					font-size: 12px;
+					border-radius: 4px;
+					border: 1px solid var(--vscode-button-background);
+					background: var(--vscode-button-background);
+					color: var(--vscode-button-foreground);
+					cursor: pointer;
+					font-weight: 600;
+				}
+
+				.backfill-section header button[data-bulk-create]:hover {
+					background: var(--vscode-button-hoverBackground);
+				}
+
+				.backfill-section header button[data-bulk-create]:disabled {
+					opacity: 0.5;
+					cursor: not-allowed;
+				}
+
 			.issue-list {
 				display: grid;
 				gap: 8px;
@@ -2470,11 +2531,9 @@ class IssueTriagePanel {
 					<div class="llm-usage-content">
 						<header class="llm-usage-header">
 							<h2>LLM Usage Tracking</h2>
-							<p class="usage-description">Monitor aggregate usage metrics and inspect detailed call activity captured by UsageTap.</p>
+							<p class="usage-description">Monitor aggregate usage metrics and inspect detailed call activity captured by <a href="https://usagetap.com" target="_blank" rel="noopener noreferrer">UsageTap.com</a> — predictable usage-based billing & insights for every AI feature you ship.</p>
 						</header>
 						<section class="llm-usage-section" aria-labelledby="llmUsageCallsHeading">
-							<h3 id="llmUsageCallsHeading">Call Details</h3>
-							<p class="usage-description">Review granular call logs to understand which features are driving usage.</p>
 							<!-- UsageTap Call Details Widget (iframe) -->
 							<div class="usagetap-widget">
 								<iframe src="${callsIframeSrc}"
@@ -2766,6 +2825,16 @@ class IssueTriagePanel {
 			case 'webview.refreshUnlinked':
 				await this.services.issueManager.refreshUnlinkedData(true);
 				break;
+			case 'webview.bulkCreateIssues': {
+				const itemType = typeof message.itemType === 'string' ? message.itemType : undefined;
+				if (itemType !== 'pull' && itemType !== 'commit') {
+					break;
+				}
+				// Get the filtered items from the message
+				const items = Array.isArray(message.items) ? message.items : undefined;
+				await this.handleBulkCreateIssues(itemType, items);
+				break;
+			}
 			case 'webview.filtersChanged': {
 				const filters = this.ensureFilterPayload(message.filters);
 				const snapshot = this.services.issueManager.getSnapshot();
@@ -3057,59 +3126,6 @@ class IssueTriagePanel {
 				}
 				break;
 			}
-			case 'webview.sendToAI': {
-				const issueNumber = this.parseIssueNumber(message.issueNumber);
-				if (issueNumber === undefined) {
-					break;
-				}
-				const snapshot = this.services.issueManager.getSnapshot();
-				const repository = snapshot.selectedRepository?.fullName;
-				if (!repository) {
-					break;
-				}
-
-				// Check if issue repository matches workspace
-				const isWorkspaceRepo = await this.services.aiIntegration.isWorkspaceRepository(repository);
-				if (isWorkspaceRepo === false) {
-					const proceed = await vscode.window.showWarningMessage(
-						`The issue is from '${repository}', but your workspace is for a different repository. The AI assistant may not have the correct code context.`,
-						'Send Anyway',
-						'Cancel'
-					);
-					if (proceed !== 'Send Anyway') {
-						break;
-					}
-				}
-
-				try {
-					const issueDetails = await this.services.github.getIssueDetails(repository, issueNumber);
-					const assessment = await this.services.assessment.getLatestAssessment(repository, issueNumber);
-					const context = this.services.aiIntegration.formatIssueContext(
-						issueDetails,
-						assessment ? {
-							compositeScore: assessment.compositeScore,
-							recommendations: assessment.recommendations,
-							summary: assessment.summary
-						} : undefined
-					);
-					const assistants = this.services.aiIntegration.getAvailableAssistants();
-					if (assistants.length === 0) {
-						void vscode.window.showWarningMessage('No AI assistant detected.');
-						break;
-					}
-					await this.services.aiIntegration.sendToAssistant(assistants[0], context);
-					this.services.telemetry.trackEvent('ai.sendToAssistant', {
-						repository,
-						issue: String(issueNumber),
-						assistant: assistants[0].id,
-						hasAssessment: String(!!assessment),
-						workspaceMatch: String(isWorkspaceRepo ?? 'unknown')
-					});
-				} catch (error) {
-					void vscode.window.showErrorMessage(`Failed to send to AI: ${error instanceof Error ? error.message : 'Unknown error'}`);
-				}
-				break;
-			}
 			case 'webview.getKeywordStats': {
 				const stats = await this.getKeywordStats();
 				await this.panel?.webview.postMessage({ type: 'ml.keywordStats', stats });
@@ -3313,6 +3329,119 @@ class IssueTriagePanel {
 				success: false,
 				error: message
 			});
+		}
+	}
+
+	private async handleBulkCreateIssues(itemType: 'pull' | 'commit', filteredItemIds?: unknown[]): Promise<void> {
+		try {
+			const snapshot = this.services.issueManager.getSnapshot();
+			const repository = snapshot.selectedRepository?.fullName;
+			if (!repository) {
+				void vscode.window.showErrorMessage('No repository selected');
+				return;
+			}
+
+			const work = snapshot.unlinkedWork;
+			const allItems = itemType === 'pull' ? work.pullRequests : work.commits;
+			
+			if (!allItems || allItems.length === 0) {
+				void vscode.window.showInformationMessage(`No unlinked ${itemType === 'pull' ? 'pull requests' : 'commits'} to process.`);
+				return;
+			}
+
+			// Filter items based on the provided IDs if available
+			let items: typeof allItems = allItems;
+			if (Array.isArray(filteredItemIds) && filteredItemIds.length > 0) {
+				if (itemType === 'pull') {
+					const prNumbers = new Set(filteredItemIds.filter((id): id is number => typeof id === 'number'));
+					items = allItems.filter(item => prNumbers.has((item as { number: number }).number)) as typeof allItems;
+				} else {
+					const shas = new Set(filteredItemIds.filter((id): id is string => typeof id === 'string'));
+					items = allItems.filter(item => shas.has((item as { sha: string }).sha)) as typeof allItems;
+				}
+			}
+
+			if (items.length === 0) {
+				void vscode.window.showInformationMessage(`No ${itemType === 'pull' ? 'pull requests' : 'commits'} match the current filters.`);
+				return;
+			}
+
+			const itemLabel = itemType === 'pull' ? 'pull requests' : 'commits';
+			const confirmation = await vscode.window.showWarningMessage(
+				`Create ${items.length} issues from unlinked ${itemLabel}?`,
+				{ modal: true },
+				'Create Issues'
+			);
+
+			if (confirmation !== 'Create Issues') {
+				return;
+			}
+
+			void vscode.window.showInformationMessage(`Creating ${items.length} issues from ${itemLabel}...`);
+
+			let successCount = 0;
+			let failureCount = 0;
+			const errors: string[] = [];
+
+			for (const item of items) {
+				try {
+					if (itemType === 'pull') {
+						const pr = item as { number: number; state?: string };
+						// Close the issue if the PR is merged or closed
+						await this.services.issueManager.createIssueFromPullRequest(pr.number, { 
+							close: pr.state !== 'open',
+							silent: true // Suppress individual notifications during batch
+						});
+					} else {
+						const commit = item as { sha: string };
+						// Close the issue since commits represent completed work
+						await this.services.issueManager.createIssueFromCommit(commit.sha, { 
+							close: true,
+							silent: true // Suppress individual notifications during batch
+						});
+					}
+					successCount++;
+				} catch (error) {
+					failureCount++;
+					const itemId = itemType === 'pull' 
+						? `#${(item as { number: number }).number}` 
+						: (item as { sha: string }).sha.slice(0, 7);
+					const message = error instanceof Error ? error.message : String(error);
+					errors.push(`${itemId}: ${message}`);
+				}
+			}
+
+			// Refresh unlinked data
+			await this.services.issueManager.refreshUnlinkedData(true);
+
+			// Show summary
+			if (failureCount === 0) {
+				void vscode.window.showInformationMessage(`Successfully created ${successCount} issues from ${itemLabel}.`);
+			} else if (successCount === 0) {
+				void vscode.window.showErrorMessage(`Failed to create issues. ${failureCount} errors occurred.`);
+			} else {
+				void vscode.window.showWarningMessage(
+					`Created ${successCount} issues, but ${failureCount} failed. Check the output for details.`
+				);
+			}
+
+			// Log errors if any
+			if (errors.length > 0) {
+				console.error('[IssueTriage] Bulk create errors:', errors);
+			}
+
+			this.services.telemetry.trackEvent('unlinked.bulkCreate', {
+				repository,
+				itemType,
+				total: String(items.length),
+				totalUnfiltered: String(allItems.length),
+				filtered: String(items.length !== allItems.length),
+				success: String(successCount),
+				failures: String(failureCount)
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Unknown error';
+			void vscode.window.showErrorMessage(`Failed to bulk create issues: ${message}`);
 		}
 	}
 
@@ -3801,6 +3930,7 @@ class IssueTriagePanel {
 	}
 
 	private toWebviewAssessment(record: AssessmentRecord): Record<string, unknown> {
+		const readiness = evaluateRecordReadiness(record);
 		return {
 			repository: record.repository,
 			issueNumber: record.issueNumber,
@@ -3813,7 +3943,9 @@ class IssueTriagePanel {
 			summary: record.summary,
 			model: record.model,
 			createdAt: record.createdAt,
-			commentUrl: this.buildCommentUrl(record)
+			commentUrl: this.buildCommentUrl(record),
+			readiness: readiness.readiness,
+			readinessScore: readiness.blendedScore
 		};
 	}
 

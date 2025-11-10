@@ -39,6 +39,7 @@ interface GitHubIssueClient {
 	}>;
 	getPullRequestBackfillDetail(repository: string, pullNumber: number): Promise<PullRequestBackfillDetail>;
 	getCommitBackfillDetail(repository: string, sha: string): Promise<CommitBackfillDetail>;
+	upsertIssueComment(repository: string, issueNumber: number, body: string, commentId?: number): Promise<number | undefined>;
 }
 
 type RiskTask = {
@@ -298,7 +299,34 @@ export class RiskIntelligenceService implements vscode.Disposable {
 				return;
 			}
 
-			const profile = await this.buildProfile(task, snapshot);
+			// Get previous profile to retrieve existing commentId
+			const previousProfile = await this.storage.getProfile(task.repository, task.issueNumber);
+			const profile = await this.buildProfile(task, snapshot, previousProfile?.commentId);
+
+			// Post comment to GitHub if enabled
+			const publishComments = this.shouldPublishComments();
+			if (publishComments) {
+				try {
+					const markdown = this.buildRiskComment(profile);
+					const commentId = await this.github.upsertIssueComment(
+						task.repository,
+						task.issueNumber,
+						markdown,
+						profile.commentId
+					);
+					if (commentId) {
+						profile.commentId = commentId;
+					}
+				} catch (commentError) {
+					this.telemetry.trackEvent('risk.commentFailed', {
+						repository: task.repository,
+						issue: String(task.issueNumber),
+						message: commentError instanceof Error ? commentError.message : String(commentError)
+					});
+					// Continue processing even if comment fails
+				}
+			}
+
 			await this.storage.saveProfile(profile);
 			this.cacheProfile(repoKey, profile);
 			const summary = this.toSummary(profile, false);
@@ -325,7 +353,7 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		}
 	}
 
-	private async buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot): Promise<RiskProfile> {
+	private async buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot, commentId?: number): Promise<RiskProfile> {
 		const pullRequests = snapshot.pullRequests ?? [];
 		const commits = snapshot.commits ?? [];
 		const metrics = this.computeMetrics(pullRequests, commits);
@@ -368,7 +396,8 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			issueSummary,
 			issueLabels: issue.labels,
 			changeSummary,
-			fileChanges
+			fileChanges,
+			commentId
 		};
 	}
 
@@ -642,6 +671,55 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		};
 	}
 
+	private buildRiskComment(profile: RiskProfile): string {
+		const riskLevelLabel = profile.riskLevel.charAt(0).toUpperCase() + profile.riskLevel.slice(1);
+		const calculatedDate = new Date(profile.calculatedAt).toLocaleString();
+		
+		const metricLines = [
+			`- ${profile.metrics.prCount} linked pull request${profile.metrics.prCount === 1 ? '' : 's'}`,
+			`- ${profile.metrics.directCommitCount} direct commit${profile.metrics.directCommitCount === 1 ? '' : 's'}`,
+			`- ${profile.metrics.filesTouched} file${profile.metrics.filesTouched === 1 ? '' : 's'} touched`,
+			`- ${profile.metrics.changeVolume} line${profile.metrics.changeVolume === 1 ? '' : 's'} changed`,
+			`- ${profile.metrics.reviewCommentCount} review friction signal${profile.metrics.reviewCommentCount === 1 ? '' : 's'}`
+		];
+
+		const driverLines = profile.drivers.length
+			? profile.drivers.map(driver => `- ${driver}`)
+			: ['- No significant risk drivers identified.'];
+
+		const evidenceLines: string[] = [];
+		for (const item of profile.evidence.slice(0, 5)) {
+			const link = item.url ? `[${item.label}](${item.url})` : item.label;
+			const detail = item.detail ? ` — ${item.detail}` : '';
+			evidenceLines.push(`- ${link}${detail}`);
+		}
+
+		const keywordLines = profile.keywords && profile.keywords.length
+			? [`**Keywords:** ${profile.keywords.join(', ')}`]
+			: [];
+
+		return [
+			'<!-- IssueTriage Risk Intelligence -->',
+			'### IssueTriage Risk Intelligence',
+			`**${riskLevelLabel} risk** · Score ${Math.round(profile.riskScore)}`,
+			'',
+			`_Last updated: ${calculatedDate}_`,
+			'',
+			'**Key metrics:**',
+			...metricLines,
+			'',
+			'**Top drivers:**',
+			...driverLines,
+			'',
+			'**Evidence:**',
+			...evidenceLines,
+			'',
+			...keywordLines,
+			'',
+			`_Analyzed ${profile.lookbackDays} days of history_`
+		].join('\n');
+	}
+
 	private cacheSummary(repository: string, issueNumber: number, summary: RiskSummary): void {
 		if (!this.summaryCache.has(repository)) {
 			this.summaryCache.set(repository, new Map());
@@ -677,6 +755,11 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		return configured
 			.map(label => label.trim().toLowerCase())
 			.filter(label => label.length > 0);
+	}
+
+	private shouldPublishComments(): boolean {
+		const configured = this.settings.get<boolean>('risk.publishComments');
+		return configured !== false; // Default to true
 	}
 }
 

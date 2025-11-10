@@ -146,7 +146,7 @@ export class SidebarMatrixView implements vscode.WebviewViewProvider, vscode.Dis
 			if (!summary || typeof summary.businessScore !== 'number') {
 				continue;
 			}
-			const readinessScore = this.clampScore(summary.compositeScore);
+			const readinessScore = this.clampScore(summary.readinessScore ?? summary.compositeScore);
 			const businessScore = this.clampScore(summary.businessScore);
 			const readinessKey = summary.readiness ?? 'prepare';
 			const readinessLabel = READINESS_LABELS[readinessKey] ?? readinessKey;

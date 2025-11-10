@@ -19,6 +19,7 @@ import { RiskIntelligenceService, RiskUpdateEvent } from './services/riskIntelli
 import { KeywordExtractionService } from './services/keywordExtractionService';
 import { ensureKeywordCoverage } from './services/keywordUtils';
 import { SimilarityService } from './services/similarityService';
+import { evaluateRecordReadiness, type AssessmentReadiness } from './services/assessmentReadiness';
 import type { RiskLevel, RiskSummary, SimilarIssue } from './types/risk';
 
 interface GitExtensionApiWrapper {
@@ -49,11 +50,10 @@ export interface FilterState extends IssueFilters {
 	readiness?: AssessmentReadiness | 'all';
 }
 
-type AssessmentReadiness = 'ready' | 'prepare' | 'review' | 'manual';
-
 interface IssueAssessmentSummary {
 	issueNumber: number;
 	compositeScore: number;
+	readinessScore: number;
 	readiness: AssessmentReadiness;
 	model: string;
 	updatedAt: string;
@@ -70,6 +70,7 @@ interface UnlinkedWorkState {
 
 interface BackfillIssueOptions {
 	close?: boolean;
+	silent?: boolean; // Suppress notifications and auto-refresh for batch operations
 }
 
 interface DashboardMetrics {
@@ -705,6 +706,7 @@ export class IssueManager implements vscode.Disposable {
 			return;
 		}
 		const closeIssue = options.close ?? false;
+		const silent = options.silent ?? false;
 		try {
 			const detail = await this.github.getPullRequestBackfillDetail(repository, pullNumber);
 			const issuePayload = this.buildPullRequestBackfillIssue(repository, detail);
@@ -720,13 +722,15 @@ export class IssueManager implements vscode.Disposable {
 				issue: String(issueNumber),
 				state: closeIssue ? 'closed' : 'open'
 			});
-			const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
-			const action = 'Open Issue';
-			const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for pull request #${pullNumber}.`, action);
-			if (selection === action) {
-				void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+			if (!silent) {
+				const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+				const action = 'Open Issue';
+				const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for pull request #${pullNumber}.`, action);
+				if (selection === action) {
+					void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+				}
+				await this.refreshUnlinkedWork(true);
 			}
-			await this.refreshUnlinkedWork(true);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.telemetry.trackEvent('issueManager.unlinked.pull.createError', {
@@ -734,7 +738,10 @@ export class IssueManager implements vscode.Disposable {
 				pull: String(pullNumber),
 				message
 			});
-			void vscode.window.showErrorMessage(`Unable to create backfill issue for PR #${pullNumber}: ${message}`);
+			if (!silent) {
+				void vscode.window.showErrorMessage(`Unable to create backfill issue for PR #${pullNumber}: ${message}`);
+			}
+			throw error; // Re-throw for batch handling
 		}
 	}
 
@@ -778,6 +785,7 @@ export class IssueManager implements vscode.Disposable {
 		}
 		const shortSha = sha.slice(0, 7);
 		const closeIssue = options.close ?? false;
+		const silent = options.silent ?? false;
 		try {
 			const detail = await this.github.getCommitBackfillDetail(repository, sha);
 			const issuePayload = this.buildCommitBackfillIssue(repository, detail);
@@ -793,13 +801,15 @@ export class IssueManager implements vscode.Disposable {
 				issue: String(issueNumber),
 				state: closeIssue ? 'closed' : 'open'
 			});
-			const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
-			const action = 'Open Issue';
-			const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for commit ${shortSha}.`, action);
-			if (selection === action) {
-				void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+			if (!silent) {
+				const issueUrl = `https://github.com/${repository}/issues/${issueNumber}`;
+				const action = 'Open Issue';
+				const selection = await vscode.window.showInformationMessage(`Created issue #${issueNumber} (${closeIssue ? 'closed' : 'open'}) for commit ${shortSha}.`, action);
+				if (selection === action) {
+					void vscode.env.openExternal(vscode.Uri.parse(issueUrl));
+				}
+				await this.refreshUnlinkedWork(true);
 			}
-			await this.refreshUnlinkedWork(true);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.telemetry.trackEvent('issueManager.unlinked.commit.createError', {
@@ -807,7 +817,10 @@ export class IssueManager implements vscode.Disposable {
 				commit: shortSha,
 				message
 			});
-			void vscode.window.showErrorMessage(`Unable to create backfill issue for commit ${shortSha}: ${message}`);
+			if (!silent) {
+				void vscode.window.showErrorMessage(`Unable to create backfill issue for commit ${shortSha}: ${message}`);
+			}
+			throw error; // Re-throw for batch handling
 		}
 	}
 
@@ -993,12 +1006,14 @@ export class IssueManager implements vscode.Disposable {
 			}
 			totalIssuesAssessed += 1;
 			const latest = result.history[0];
-			const readiness = this.toReadiness(latest.compositeScore);
+			const readinessEvaluation = evaluateRecordReadiness(latest);
+			const readiness = readinessEvaluation.readiness;
 			readinessDistribution[readiness] += 1;
 			compositeAccumulator += latest.compositeScore;
 			summaries[result.issueNumber] = {
 				issueNumber: result.issueNumber,
 				compositeScore: latest.compositeScore,
+				readinessScore: readinessEvaluation.blendedScore,
 				readiness,
 				model: latest.model,
 				updatedAt: latest.createdAt,
@@ -1023,19 +1038,6 @@ export class IssueManager implements vscode.Disposable {
 			assessmentsLastSevenDays,
 			readinessDistribution
 		};
-	}
-
-	private toReadiness(score: number): AssessmentReadiness {
-		if (score >= 80) {
-			return 'ready';
-		}
-		if (score >= 60) {
-			return 'prepare';
-		}
-		if (score >= 40) {
-			return 'review';
-		}
-		return 'manual';
 	}
 
 	private applyFilters(): void {

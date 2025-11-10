@@ -81,6 +81,11 @@
 	const backfillPanel = /** @type {HTMLElement} */ (requireElement('backfillPanel'));
 	const backfillBody = /** @type {HTMLElement} */ (requireElement('backfillBody'));
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
+	
+	// Unlinked filter state
+	let unlinkedPrLimit = 50;
+	let unlinkedCommitLimit = 50;
+	let unlinkedDateFilter = 'all';
 	const analysisActions = /** @type {HTMLElement} */ (requireElement('analysisActions'));
 	const runAnalysisButton = /** @type {HTMLButtonElement} */ (requireElement('runAnalysisButton'));
 	const mlTrainingPanel = /** @type {HTMLElement} */ (requireElement('mlTrainingPanel'));
@@ -1284,10 +1289,6 @@
 			if (typeof selectedIssueNumber === 'number') {
 				vscodeApi.postMessage({ type: 'webview.copyIssueForAI', issueNumber: selectedIssueNumber });
 			}
-		} else if (action === 'sendToAI') {
-			if (typeof selectedIssueNumber === 'number') {
-				vscodeApi.postMessage({ type: 'webview.sendToAI', issueNumber: selectedIssueNumber });
-			}
 		} else if (action === 'exportMarkdown') {
 			if (typeof selectedIssueNumber === 'number') {
 				vscodeApi.postMessage({ type: 'webview.exportAssessment', issueNumber: selectedIssueNumber, format: 'markdown' });
@@ -1436,6 +1437,39 @@
 		if (!(event.target instanceof HTMLElement)) {
 			return;
 		}
+		
+		// Handle bulk create buttons
+		const bulkButton = event.target.closest('button[data-bulk-create]');
+		if (bulkButton && backfillPanel.contains(bulkButton)) {
+			event.preventDefault();
+			const type = bulkButton.getAttribute('data-bulk-create');
+			if (type === 'pull' || type === 'commit') {
+				// Get the current filtered items from latestState
+				if (!latestState || !latestState.unlinkedWork) {
+					return;
+				}
+				const work = latestState.unlinkedWork;
+				const allItems = type === 'pull' ? work.pullRequests : work.commits;
+				const filteredItems = filterUnlinkedItems(
+					allItems ?? [],
+					type === 'pull' ? unlinkedPrLimit : unlinkedCommitLimit,
+					unlinkedDateFilter
+				);
+				
+				// Extract just the IDs/SHAs to send
+				const itemIds = type === 'pull'
+					? filteredItems.map(pr => pr.number)
+					: filteredItems.map(commit => commit.sha);
+				
+				vscodeApi.postMessage({ 
+					type: 'webview.bulkCreateIssues', 
+					itemType: type,
+					items: itemIds
+				});
+			}
+			return;
+		}
+		
 		const button = event.target.closest('button[data-backfill-action]');
 		if (!button || !backfillPanel.contains(button)) {
 			return;
@@ -1473,6 +1507,30 @@
 				vscodeApi.postMessage({ type: 'webview.createIssueFromCommit', sha: id, state: 'open' });
 			} else if (action === 'create-closed') {
 				vscodeApi.postMessage({ type: 'webview.createIssueFromCommit', sha: id, state: 'closed' });
+			}
+		}
+	});
+
+	// Handle filter changes for unlinked tab
+	backfillPanel.addEventListener('change', event => {
+		if (!(event.target instanceof HTMLElement)) {
+			return;
+		}
+		const target = /** @type {HTMLSelectElement} */ (event.target);
+		if (target.id === 'unlinkedPrLimit') {
+			unlinkedPrLimit = Number(target.value) || 50;
+			if (latestState) {
+				renderBackfillPanel(latestState);
+			}
+		} else if (target.id === 'unlinkedCommitLimit') {
+			unlinkedCommitLimit = Number(target.value) || 50;
+			if (latestState) {
+				renderBackfillPanel(latestState);
+			}
+		} else if (target.id === 'unlinkedDateFilter') {
+			unlinkedDateFilter = target.value || 'all';
+			if (latestState) {
+				renderBackfillPanel(latestState);
 			}
 		}
 	});
@@ -1576,6 +1634,7 @@
 
 		const showIssues = currentTab !== 'unlinked' && currentTab !== 'mlTraining' && currentTab !== 'matrix' && currentTab !== 'llmUsage';
 		const showMatrix = currentTab === 'matrix';
+		const showUnlinked = currentTab === 'unlinked';
 		if (loadingState) {
 			loadingState.hidden = !showIssues || !loading;
 		}
@@ -1588,7 +1647,7 @@
 		const showLlmUsage = currentTab === 'llmUsage';
 		overviewMetrics.hidden = currentTab !== 'open' && currentTab !== 'closed';
 		issueList.hidden = !showIssues;
-		issuesPanel.hidden = !showIssues;
+		issuesPanel.hidden = !showIssues && !showUnlinked;
 		matrixPanel.hidden = !showMatrix;
 		matrixPanel.classList.toggle('visible', showMatrix);
 		matrixPanel.setAttribute('aria-hidden', showMatrix ? 'false' : 'true');
@@ -2363,19 +2422,108 @@
 			backfillBody.innerHTML = updatedText + '<div class="backfill-empty">Everything is linked. No pull requests or commits need backfill.</div>';
 			return;
 		}
-		const pullSection = renderBackfillSection('Pull requests', work.pullRequests?.length ?? 0, renderBackfillPullRequests(work.pullRequests ?? []));
-		const commitSection = renderBackfillSection('Commits', work.commits?.length ?? 0, renderBackfillCommits(work.commits ?? []));
-		backfillBody.innerHTML = updatedText + '<div class="backfill-columns">' + pullSection + commitSection + '</div>';
+		
+		// Apply filters
+		const filteredPullRequests = filterUnlinkedItems(work.pullRequests ?? [], unlinkedPrLimit, unlinkedDateFilter);
+		const filteredCommits = filterUnlinkedItems(work.commits ?? [], unlinkedCommitLimit, unlinkedDateFilter);
+		
+		// Render filter controls
+		const filterHtml = renderUnlinkedFilters(
+			work.pullRequests?.length ?? 0,
+			work.commits?.length ?? 0,
+			filteredPullRequests.length,
+			filteredCommits.length
+		);
+		
+		const pullSection = renderBackfillSection('Pull requests', filteredPullRequests.length, renderBackfillPullRequests(filteredPullRequests), 'pull');
+		const commitSection = renderBackfillSection('Commits', filteredCommits.length, renderBackfillCommits(filteredCommits), 'commit');
+		backfillBody.innerHTML = updatedText + filterHtml + '<div class="backfill-columns">' + pullSection + commitSection + '</div>';
+	}
+	
+	/**
+	 * @param {number} totalPrs
+	 * @param {number} totalCommits
+	 * @param {number} filteredPrs
+	 * @param {number} filteredCommits
+	 * @returns {string}
+	 */
+	function renderUnlinkedFilters(totalPrs, totalCommits, filteredPrs, filteredCommits) {
+		const limitOptions = [5, 10, 20, 30, 40, 50];
+		const prLimitSelect = '<select id="unlinkedPrLimit" aria-label="Pull request limit">' +
+			limitOptions.map(limit => '<option value="' + limit + '"' + (limit === unlinkedPrLimit ? ' selected' : '') + '>Last ' + limit + '</option>').join('') +
+		'</select>';
+		const commitLimitSelect = '<select id="unlinkedCommitLimit" aria-label="Commit limit">' +
+			limitOptions.map(limit => '<option value="' + limit + '"' + (limit === unlinkedCommitLimit ? ' selected' : '') + '>Last ' + limit + '</option>').join('') +
+		'</select>';
+		const dateFilterSelect = '<select id="unlinkedDateFilter" aria-label="Date filter">' +
+			'<option value="all"' + (unlinkedDateFilter === 'all' ? ' selected' : '') + '>All time</option>' +
+			'<option value="30"' + (unlinkedDateFilter === '30' ? ' selected' : '') + '>Last 30 days</option>' +
+			'<option value="60"' + (unlinkedDateFilter === '60' ? ' selected' : '') + '>Last 60 days</option>' +
+			'<option value="90"' + (unlinkedDateFilter === '90' ? ' selected' : '') + '>Last 90 days</option>' +
+		'</select>';
+		
+		const prCountText = filteredPrs !== totalPrs ? filteredPrs + ' of ' + totalPrs : filteredPrs + '';
+		const commitCountText = filteredCommits !== totalCommits ? filteredCommits + ' of ' + totalCommits : filteredCommits + '';
+		
+		return '<div class="unlinked-filters">' +
+			'<div class="filter-group">' +
+				'<label>Pull Requests: ' + prLimitSelect + ' (' + prCountText + ')</label>' +
+			'</div>' +
+			'<div class="filter-group">' +
+				'<label>Commits: ' + commitLimitSelect + ' (' + commitCountText + ')</label>' +
+			'</div>' +
+			'<div class="filter-group">' +
+				'<label>Date: ' + dateFilterSelect + '</label>' +
+			'</div>' +
+		'</div>';
+	}
+	
+	/**
+	 * @param {Array<any>} items
+	 * @param {number} limit
+	 * @param {string} dateFilter
+	 * @returns {Array<any>}
+	 */
+	function filterUnlinkedItems(items, limit, dateFilter) {
+		if (!Array.isArray(items) || items.length === 0) {
+			return [];
+		}
+		
+		let filtered = items.slice();
+		
+		// Apply date filter if not 'all'
+		if (dateFilter !== 'all') {
+			const days = Number(dateFilter);
+			if (Number.isFinite(days) && days > 0) {
+				const cutoffDate = new Date();
+				cutoffDate.setDate(cutoffDate.getDate() - days);
+				filtered = filtered.filter(item => {
+					const dateField = item.updatedAt || item.committedDate;
+					if (!dateField) {
+						return true; // Include items without dates
+					}
+					const itemDate = new Date(dateField);
+					return itemDate >= cutoffDate;
+				});
+			}
+		}
+		
+		// Apply limit
+		return filtered.slice(0, limit);
 	}
 
 	/**
 	 * @param {string} title
 	 * @param {number} count
 	 * @param {string} contentHtml
+	 * @param {string} type
 	 */
-	function renderBackfillSection(title, count, contentHtml) {
+	function renderBackfillSection(title, count, contentHtml, type) {
 		const countLabel = count === 1 ? '1 unlinked item' : count + ' unlinked items';
-		return '<section class="backfill-section"><header><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(countLabel) + '</p></header>' + contentHtml + '</section>';
+		const bulkButton = count > 0
+			? '<button type="button" class="compact-button" data-bulk-create="' + type + '">Create issues for each unlinked ' + (type === 'pull' ? 'pull request' : 'commit') + '</button>'
+			: '';
+		return '<section class="backfill-section"><header><h3>' + escapeHtml(title) + '</h3><p>' + escapeHtml(countLabel) + '</p>' + bulkButton + '</header>' + contentHtml + '</section>';
 	}
 
 	/**
@@ -2686,8 +2834,11 @@
 	/**
 	 * @param {any} score
 	 */
-	function getReadiness(score) {
-		const key = readinessKeyFromScore(score);
+	function getReadiness(score, keyOverride) {
+		const numericScore = typeof score === 'number' && Number.isFinite(score) ? score : 0;
+		const key = typeof keyOverride === 'string' && keyOverride
+			? keyOverride
+			: readinessKeyFromScore(numericScore);
 		const info = getReadinessByKey(key);
 		return {
 			key,
@@ -2725,7 +2876,10 @@
 	 */
 	function renderAssessmentResult(data) {
 		latestAssessment = data;
-		const readiness = getReadiness(data.compositeScore);
+		const readiness = getReadiness(
+			typeof data.readinessScore === 'number' ? data.readinessScore : data.compositeScore,
+			typeof data.readiness === 'string' ? data.readiness : undefined
+		);
 		const updatedAt = new Date(data.createdAt).toLocaleString();
 		const issueUrl = getIssueUrl(data.issueNumber);
 		const questions = Array.isArray(data.recommendations) ? data.recommendations : [];
@@ -2763,7 +2917,6 @@
 			'<div class="assessment-actions">'
 	);
 			lines.push('<button class="button-link" type="button" data-action="copyForAI">📋 Copy for AI</button>');
-			lines.push('<button class="button-link" type="button" data-action="sendToAI">🤖 Send to AI Assistant</button>');
 			lines.push('<button class="button-link" type="button" data-action="exportMarkdown">Export Markdown</button>');
 			lines.push('<button class="button-link" type="button" data-action="exportJson">Export JSON</button>');
 		if (issueUrl) {
@@ -2789,7 +2942,10 @@
 		}
 		const items = assessmentHistory.map((/** @param {any} record */ record, /** @param {any} index */ index) => {
 			const isLatest = index === 0;
-			const readiness = getReadiness(record.compositeScore);
+			const readiness = getReadiness(
+				typeof record.readinessScore === 'number' ? record.readinessScore : record.compositeScore,
+				typeof record.readiness === 'string' ? record.readiness : undefined
+			);
 			const timestamp = new Date(record.createdAt).toLocaleString();
 			const latestClass = isLatest ? ' latest' : '';
 			let trendHtml = '';

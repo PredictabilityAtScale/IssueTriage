@@ -115,7 +115,7 @@ export class UsageTapView implements vscode.WebviewViewProvider, vscode.Disposab
 </head>
 <body>
 	<div class="usage-container">
-		<div class="usage-description">Monitor your included AI model usage and token consumption tracked by UsageTap.com. You can add your own API key in issue triage settings.</div>
+		<div class="usage-description">Monitor your included AI model usage and token consumption tracked by <a href="https://usagetap.com" target="_blank" rel="noopener noreferrer" style="color: var(--vscode-textLink-foreground); text-decoration: none;">UsageTap.com</a> — predictable usage-based billing & insights for every AI feature you ship. You can add your own API key in issue triage settings.</div>
 		<!-- UsageTap Widget (iframe) -->
 		<div class="usagetap-widget">
 			<iframe src="${iframeSrc}"

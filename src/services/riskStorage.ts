@@ -76,8 +76,9 @@ export class RiskStorage implements RiskProfileStore {
 				issue_summary,
 				issue_labels,
 				change_summary,
-				file_changes
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				file_changes,
+				comment_id
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repository, issue_number) DO UPDATE SET
 				risk_level = excluded.risk_level,
 				risk_score = excluded.risk_score,
@@ -92,7 +93,8 @@ export class RiskStorage implements RiskProfileStore {
 				issue_summary = excluded.issue_summary,
 				issue_labels = excluded.issue_labels,
 				change_summary = excluded.change_summary,
-				file_changes = excluded.file_changes`,
+				file_changes = excluded.file_changes,
+				comment_id = excluded.comment_id`,
 			[
 				profile.repository,
 				profile.issueNumber,
@@ -109,7 +111,8 @@ export class RiskStorage implements RiskProfileStore {
 				profile.issueSummary,
 				issueLabelsJson,
 				profile.changeSummary,
-				fileChangesJson
+				fileChangesJson,
+				profile.commentId ?? null
 			]
 		);
 		await this.persist();
@@ -238,7 +241,8 @@ export class RiskStorage implements RiskProfileStore {
 			issueSummary: String(row.issue_summary ?? ''),
 			issueLabels: this.parseJson(row.issue_labels, []),
 			changeSummary: String(row.change_summary ?? ''),
-			fileChanges: this.parseJson(row.file_changes, [])
+			fileChanges: this.parseJson(row.file_changes, []),
+			commentId: row.comment_id ? Number(row.comment_id) : undefined
 		};
 	}
 
@@ -322,6 +326,11 @@ export class RiskStorage implements RiskProfileStore {
 		}
 		try {
 			db.run(`ALTER TABLE risk_profiles ADD COLUMN file_changes TEXT;`);
+		} catch (error) {
+			// Ignore if column already exists
+		}
+		try {
+			db.run(`ALTER TABLE risk_profiles ADD COLUMN comment_id INTEGER;`);
 		} catch (error) {
 			// Ignore if column already exists
 		}
