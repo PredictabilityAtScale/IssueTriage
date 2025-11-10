@@ -1,164 +1,192 @@
 # IssueTriage
 
-IssueTriage adds an interactive triage dashboard to Visual Studio Code so product and engineering teams can quickly assess how ready an issue is for implementation.
+**Intelligent AI Readiness for GitHub Issues**
 
-As of the Phase 1 build, the extension connects directly to GitHub, surfaces repository backlogs, and lets you filter issues before moving into the assessment workflow.
+IssueTriage turns every GitHub backlog into an automation-ready funnel. Inside VS Code and Cursor you can triage issues, surface historical risk, run context-aware AI assessments, and decide which work can safely go to coding agents.
 
-## Features
+![IssueTriage Webview Panel](images/IssueTriage_panel2.png)
 
-- Launch the **Issue Triage** panel from the command palette (`Issue Triage: Open Panel`), the Issue Triage status bar button, or the **Issue Triage sidebar** in the Activity Bar.
-- Browse issues in the dedicated **Issue Triage sidebar** with:
-  - Repository drop-down (click the repository name to switch workspaces)
-  - Readiness distribution stats (click to filter, click again or **Clear Readiness Filter** to reset)
-  - Issue groups separated by assessment status (Not Assessed, Automation Ready, Prep Required, Needs Review, Manual Only)
-  - Quick actions: Open the full panel, refresh, assess individual issues, or send automation-ready issues to the AI agent
-  - Inline labels plus color-coded readiness dots that mirror the main panel
-- Authenticate with GitHub via device code to load repositories you own or collaborate on.
-- Browse open issues, search titles, and filter by label, assignee, or milestone inside VS Code.
-- See inline risk badges powered by historical GitHub activity to highlight hotspots before you assess them.
-- Track readiness with the weighted checklist focused on problem clarity, impact, dependencies, safeguards, and validation (future phases enrich this with AI scoring).
-- See the most recent assessment’s composite score, dimension breakdowns, summary, and recommendations directly inside the panel, with quick links back to the issue or GitHub comment.
-- Review a dedicated **Risk Intelligence** section on every issue that surfaces linked pull requests, change volume, review friction, and top risk drivers.
-- Run **Issue Triage: Assess Selected Issue** to generate an AI-assisted readiness assessment using OpenRouter, with results stored locally and (optionally) posted back to the GitHub issue.
-- Use **Issue Triage: Run Context Tool** to execute curated CLI utilities (like the built-in workspace snapshot) and feed their output into the next assessment run.
-- Jump from the list to the GitHub issue in your browser for deeper inspection.
-- Monitor whether guarded automation launch is enabled via the panel badge (controlled through `issuetriage.automation.launchEnabled`).
+## Why Teams Use IssueTriage
 
-## Getting Started
+- **Prioritize by evidence** – Composite readiness scores combine requirements clarity, code complexity, security sensitivity, and business impact.
+- **Catch hidden risk** – Linked pull requests, change volume, and review friction automatically temper optimistic scores.
+- **Work where you code** – Native sidebar views, commands, and status bar entry points for both VS Code and Cursor.
+- **Stay in control** – All assessment and risk data is stored locally in SQLite; you decide whether to publish results back to GitHub.
 
-### 1. Connect GitHub (once per workspace)
+### Built for Technical Leads
 
+- Deep GitHub integration: issues, labels, assignees, milestones, linked PRs, commit history.
+- Flexible LLM routing: remote Cloudflare worker proxy or direct OpenRouter calls with your own key.
+- CLI tool orchestration: attach workspace diagnostics and custom scripts to assessment prompts.
+- Optional UsageTap telemetry: track LLM usage while honoring opt-out preferences.
 
-1. Open the command palette and run **Issue Triage: Connect Repository** (or click **Connect GitHub** in the side panel).
-2. Follow the device-code prompt in the browser to authorize IssueTriage.
-3. Return to VS Code—once the worker confirms the authorization, the Issue Triage views will populate with your repositories.
+## Architecture at a Glance
 
-### 2. Configure LLM access (once per developer)
+| Layer | What It Does |
+| --- | --- |
+| **GitHub auth & data** | Device-code OAuth, repository discovery, issue snapshots, linked PR hydration. |
+| **Assessment service** | Builds structured prompts, calls OpenRouter, validates JSON responses, persists history. |
+| **Risk intelligence** | Computes metrics from PRs and commits, derives risk levels, applies score adjustments. |
+| **CLI context tools** | Runs built-in or custom commands, streams output into assessments, caches recent runs. |
+| **Storage** | Local `assessments.db` and `risk-profiles.db` (sql.js) plus VS Code secret storage for tokens. |
 
-IssueTriage can call OpenRouter directly (**local** mode) or forward requests through the hosted IssueTriage Cloudflare Worker (**remote** mode). Remote mode is now the default.
+## Interface Tour
 
-1. Confirm your desired mode via `ISSUETRIAGE_LLM_MODE` (or **Settings → Extensions → IssueTriage → Assessment: Llm Mode**). Leave it unset for the default **remote** flow.
-2. In **remote mode**:
-  - Optionally override the worker endpoint by setting `ISSUETRIAGE_LLM_REMOTE_URL` (or **Assessment: Remote Endpoint**); the default points to the hosted worker.
-  - No OpenRouter key is required locally because the worker holds it as a secret.
-3. In **local mode**:
-  - Sign up at [OpenRouter](https://openrouter.ai/) and create an API key.
-  - Provide the key via one of the following:
-    - Add `ISSUETRIAGE_OPENROUTER_API_KEY=your_api_key` to `.env` (preferred for local development).
-    - Or set **Settings → Extensions → IssueTriage → Assessment: Api Key**.
-4. Adjust model selections if desired:
-  - `issuetriage.assessment.preferredModel` (default `openai/gpt-5-mini`).
-  - Toggle premium mode with `issuetriage.assessment.usePremiumModel` to use `issuetriage.assessment.premiumModel`.
-5. Reload VS Code after changing environment variables.
+### 1. Full Assessment Panel
 
-### 2a. (Optional) Enable UsageTap logging
+- Tabbed layout (Issues, ML Training, LLM Usage).
+- Score breakdown, summary, recommendations, automation badge, assessment history timeline.
+- Risk Intelligence section with top drivers and PR evidence.
 
-IssueTriage records LLM usage events to [UsageTap](https://usagetap.com/) using a restricted, embedded client key dedicated to begin/end call telemetry.
+![Assessment Detail View](images/IssueTriage_panel.png)
 
-1. Requests always target `https://api.usagetap.com` with the baked-in credential; no extra configuration is required.
-2. UsageTap instrumentation still respects the existing `issuetriage.telemetry.enabled` opt-in. Leave the extension setting off if you prefer to disable all telemetry.
-3. Turn on **Telemetry: UsageTap Debug** (or set `ISSUETRIAGE_USAGETAP_DEBUG=1`) to stream verbose integration logs to the *IssueTriage UsageTap* output channel while troubleshooting.
+### 2. Activity Bar Sidebar
 
-> **Automation Launch Guard**: Keep `issuetriage.automation.launchEnabled` at its default `false` while automation workflows are still in development. Enable it only when the downstream automation adapter is configured.
+- Repository selector, readiness distribution, grouped issue lists (Not Assessed, Ready, Prep Required, Needs Review, Manual Only).
+- Inline quick actions: assess, refresh, send to automation.
+- Color-coded badges that mirror assessment readiness.
 
-### 3. Open the Issue Triage panel
+![Sidebar Distribution Legend](images/IssueTriage-panel-legend.png)
 
-1. Click the **Issue Triage** icon in the Activity Bar (left sidebar) to see a quick list of issues, or press `F1` / `Ctrl+Shift+P` and run **Issue Triage: Open Panel** to open the full webview *(alternatively click the Issue Triage status bar button).* Use the repository drop-down at the top of the sidebar to change contexts at any time.
-2. Use **Connect GitHub** if prompted to complete the device-code flow (copy the displayed code, follow the browser prompt, and authorize the app).
+### 3. Opportunity Mix Matrix
 
-### 4. Explore your backlog
+- Scatter plot of business value vs. readiness using assessed issues only.
+- Hover to inspect, click to open GitHub, legend keyed to readiness states.
 
-1. Pick a repository from the dropdown (default respects `issuetriage.github.defaultRepository` if configured).
-2. Search titles or apply label/assignee/milestone filters to focus on candidates.
-3. Click an issue card to load its latest assessment in the panel (double-click to open on GitHub).
-4. Use **Refresh** to pull the latest data or **Issue Triage: Refresh Issues** from the command palette.
+### 4. Assessment Question Flow
 
-### 5. Run AI assessments
+- Guided checklist for automation readiness questions, each with AI-assisted answers and follow-up prompts.
 
-1. Filter to the issue you want to evaluate.
-2. Run **Issue Triage: Assess Selected Issue** and pick the issue from the quick pick list.
-3. The extension will call OpenRouter, write the result to a local SQLite database, and (if `issuetriage.assessment.publishComments` is true) upsert a single comment on the GitHub issue tagged with `<!-- IssueTriage Assessment -->`.
-4. Composite and dimension scores, a summary, and recommendations now appear in both the panel and the optional GitHub comment for the team to review.
+![Assessment Question Flow](images/IssueTriage_assessment_question.png)
 
-### Optional: Tune risk analysis
+## Workflow
 
-1. Adjust `issuetriage.risk.lookbackDays` (default 180) to widen or narrow the historical window that drives risk intelligence.
-2. Use `issuetriage.risk.labelFilters` to restrict hydration to issues carrying specific labels (helpful when triage leads focus on certain workstreams).
-3. Risk badges and the Risk Intelligence panel will refresh automatically the next time you load or refresh issues.
+1. **Connect** – Run `Issue Triage: Connect Repository` and complete the device-code sign-in.
+2. **Explore** – Use the sidebar or matrix to find high-value candidates or risky outliers.
+3. **Assess** – Trigger `Issue Triage: Assess Selected Issue`; IssueTriage gathers CLI context, calls the LLM, and updates history.
+4. **Act** – Share results via optional GitHub comment, continue refinement, or launch automation if enabled.
 
-### 6. Run workspace context tools
+## Quick Start (VS Code & Cursor)
 
-1. Run **Issue Triage: Run Context Tool** and pick the built-in **Workspace Snapshot** or a custom tool you've registered under `issuetriage.cliTools`.
-2. Review command output in the *IssueTriage CLI Context* output channel; the latest successful runs are automatically attached to future assessments.
-3. Add additional tools by updating the `issuetriage.cliTools` setting with objects that specify an `id`, `command`, optional `args`, and whether they should `autoRun` before each assessment.
+1. Install **IssueTriage** from the marketplace (works identically in Cursor).
+2. Open the command palette → `Issue Triage: Connect Repository` → authorize in the browser.
+3. Choose your LLM mode:
+   - **Remote (default)** – Requests go through the hosted Cloudflare worker, no local key required.
+   - **Local** – Provide your own OpenRouter key via `.env` (`ISSUETRIAGE_OPENROUTER_API_KEY`) or settings.
+4. Open the panel (`Issue Triage: Open Panel`) or sidebar icon, select a repository, and run your first assessment.
 
-### 7. Manage sessions
+## Configuration Highlights
 
-- Run **Issue Triage: Sign Out** to revoke local tokens (secrets are stored via VS Code SecretStorage).
-- Re-run **Connect GitHub** any time you rotate OAuth credentials or need to change accounts.
+### LLM Modes
 
-### 8. Machine Learning Training (MVP)
+```jsonc
+// settings.json
+{
+  "issuetriage.assessment.llmMode": "remote",           // or "local"
+  "issuetriage.assessment.remoteEndpoint": "",          // override worker URL (remote mode)
+  "issuetriage.assessment.standardModel": "openai/gpt-5-mini",
+  "issuetriage.assessment.premiumModel": "openai/gpt-5",
+  "issuetriage.assessment.usePremiumModel": false
+}
+```
 
-IssueTriage includes an MVP implementation of historical risk learning using keyword-based similarity search. Access the **ML Training** tab in the Issue Triage panel to manage keyword extraction and dataset export.
+### Custom CLI Context Tools
 
-#### Keyword Extraction
-- When risk analysis runs on closed issues, IssueTriage automatically extracts 5-8 keywords representing:
-  - Components/subsystems (e.g., "authentication", "database", "ui")
-  - Change types (e.g., "refactor", "bugfix", "feature", "migration")
-  - Risk signals (e.g., "breaking-change", "security", "performance")
-- Keywords are stored in the local SQLite database and indexed using FTS5 for fast searching.
+```jsonc
+{
+  "issuetriage.cliTools": [
+    {
+      "id": "test-coverage",
+      "title": "Test Coverage Report",
+      "command": "npm",
+      "args": ["run", "test:coverage"],
+      "cwd": "${workspaceRoot}",
+      "autoRun": true,
+      "refreshIntervalMs": 300000,
+      "enabled": true
+    }
+  ]
+}
+```
+Tokens supported: `${workspaceRoot}`, `${workspaceFolder}`, `${extensionRoot}`.
 
-#### Using the ML Training Tab
-1. Open the Issue Triage panel and click the **ML Training** tab.
-2. View real-time **Keyword Coverage** statistics showing:
-   - Total closed issues in the selected repository
-   - Issues with extracted keywords
-   - Coverage percentage (target: 95%+)
-3. Click **Backfill Keywords** to extract keywords for closed issues that don't have them yet:
-   - Progress bar shows current issue and completion percentage
-   - Token usage is monitored (200k token daily budget by default)
-   - Click **Cancel** to stop the process (resumes from checkpoint)
-4. Click **Export Training Dataset** to validate and prepare the dataset for ML training:
-   - Validates keyword coverage meets minimum threshold (95%)
-   - Verifies sufficient historical data
-   - Generates manifest with export metadata
-5. View **Last Export** information including timestamp and record counts.
+### Risk Intelligence Tuning
 
-#### Command Palette Alternative
-- **Issue Triage: Backfill Keywords** - Start keyword extraction from command palette
-- **Issue Triage: Export Training Dataset** - Export dataset from command palette
+```jsonc
+{
+  "issuetriage.risk.lookbackDays": 180,
+  "issuetriage.risk.labelFilters": ["bug", "feature"],
+  "issuetriage.risk.publishComments": true
+}
+```
 
-#### Similarity Search
-- Keywords enable fast similarity matching using:
-  - FTS5 full-text search for initial candidate retrieval
-  - Jaccard similarity re-ranking for precision
-  - Shared keywords and labels boost relevance
-- Similarity results show keyword overlap percentage and shared risk signals.
+### Automation Launch Guard
 
-#### Future Enhancements
-See `plans/feature-risk-learning-semantic.md` for planned semantic search with embeddings and hybrid retrieval.
+```jsonc
+{
+  "issuetriage.automation.launchEnabled": false
+}
+```
+Only enable when your downstream AI coding agent integration is ready.
+
+## Command Palette Reference
+
+| Command | Purpose |
+| --- | --- |
+| `Issue Triage: Open Panel` | Show the full assessment webview. |
+| `Issue Triage: Connect Repository` | Authenticate and select a GitHub repository. |
+| `Issue Triage: Change Repository` | Switch between accessible repositories. |
+| `Issue Triage: Refresh Issues` | Pull the latest backlog snapshot. |
+| `Issue Triage: Assess Selected Issue` | Run an AI assessment for a chosen issue. |
+| `Issue Triage: Run Context Tool` | Execute a configured CLI helper manually. |
+| `Issue Triage: Backfill Keywords` | Extract historical keywords for ML training. |
+| `Issue Triage: Export Training Dataset` | Generate training data manifest and archive. |
+| `Issue Triage: Send to Automation` | Queue an automation-ready issue (when enabled). |
+| `Issue Triage: Sign Out` | Clear GitHub credentials and cached tokens. |
+
+## Readiness Categories
+
+| Composite Score | Category | Recommended Action |
+| --- | --- | --- |
+| 80–100 | 🟢 Automation Ready | Launch automation or hand off to AI agent. |
+| 60–79 | 🟡 Prep Required | Address recommendations, clarify requirements, rerun assessment. |
+| 40–59 | 🟠 Needs Review | Break down work, add tests, capture missing context, reassess. |
+| 0–39 | 🔴 Manual Only | Keep the work with humans; automate only after major refactor. |
+
+Risk intelligence multiplies composite scores by **0.8** (high risk) or **0.9** (medium risk) when history indicates caution.
+
+## Telemetry & Privacy
+
+- Local-first storage: assessment and risk databases live under VS Code global storage.
+- GitHub comments: controlled via `issuetriage.assessment.publishComments` and `issuetriage.risk.publishComments`.
+- Telemetry: disable entirely with `issuetriage.telemetry.enabled = false`.
+- UsageTap integration: optional debug logs via `issuetriage.telemetry.usagetapDebug`.
+- Source code never leaves your machine unless your custom CLI tools transmit data.
+
+## Troubleshooting Checklist
+
+- **Auth problems** – Rerun `Issue Triage: Sign Out`, ensure the verification URL is reachable, and restart the editor.
+- **Missing API key (local mode)** – Confirm `.env` or settings contain `ISSUETRIAGE_OPENROUTER_API_KEY`; reload after changes.
+- **Provider errors** – Check OpenRouter status, switch to the standard model, or retry once rate limits reset.
+- **Empty issue list** – Verify you have repo access and refresh via the command palette.
+- **Risk data missing** – Ensure issues have linked PRs/commits within the configured lookback window.
 
 ## Requirements
 
-- Visual Studio Code 1.105.0 or later.
-- Ability to register a GitHub OAuth App (personal or organization).
-- Network access to `github.com` for API calls.
+- VS Code 1.95.0+ or Cursor (latest builds).
+- GitHub account with repository access.
+- Network access to `github.com` and OpenRouter (or your configured proxy).
+- Optional: OpenRouter API key for local LLM mode.
 
-## Release Notes
+## Release Notes (0.0.11)
 
-### 0.0.1
-
-- Initial release with GitHub integration (device-code auth, repo + issue browsing, filterable backlog) and the readiness checklist scaffold.
-- Added OpenRouter-powered assessments with local SQLite history and single-comment GitHub publishing.
-
----
-
-## Troubleshooting
-
-- **"GitHub OAuth client credentials are not configured"**: Ensure `.env` or settings contain valid client ID/secret and reload VS Code.
-- **Device-code flow stalls**: Confirm the OAuth app allows the account you’re using and that the verification URL isn’t blocked by network policy.
-- **Rate limits**: The UI surfaces warnings when GitHub rate limits are hit; retry later or reduce refresh frequency.
+- Opportunity Mix matrix webview inside the sidebar.
+- Expanded assessment panel with risk intelligence, automation guard, and history timeline.
+- ML Training tab with keyword backfill and dataset export workflows.
+- CLI context tool orchestration with auto-run support and output history.
+- Remote (worker-proxied) and local OpenRouter LLM modes with premium toggle.
+- UsageTap LLM usage tracking with opt-in telemetry controls.
 
 ---
 
-Let us know how IssueTriage can better support your triage process!
+Triage faster, ship safer. [Report issues](https://github.com/PredictabilityAtScale/IssueTriage/issues) or [explore the code](https://github.com/PredictabilityAtScale/IssueTriage).

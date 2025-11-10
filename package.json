@@ -13,8 +13,27 @@
     "vscode": "^1.95.0"
   },
   "categories": [
+    "SCM Providers",
+    "Machine Learning",
     "Other"
   ],
+  "keywords": [
+    "github",
+    "issue",
+    "triage",
+    "risk",
+    "automation",
+    "ai"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "qna": "marketplace",
+  "homepage": "https://github.com/PredictabilityAtScale/IssueTriage#readme",
+  "bugs": {
+    "url": "https://github.com/PredictabilityAtScale/IssueTriage/issues"
+  },
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished"
@@ -36,7 +55,8 @@
       {
         "command": "issuetriage.changeRepository",
         "title": "Issue Triage: Change Repository",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(repo)"
       },
       {
         "command": "issuetriage.refreshIssues",
@@ -53,22 +73,26 @@
       {
         "command": "issuetriage.runContextTool",
         "title": "Issue Triage: Run Context Tool",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(terminal)"
       },
       {
         "command": "issuetriage.backfillKeywords",
         "title": "Issue Triage: Backfill Keywords",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(history)"
       },
       {
         "command": "issuetriage.trainModel",
         "title": "Issue Triage: Export Training Dataset",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "issuetriage.signOut",
         "title": "Issue Triage: Sign Out",
-        "category": "Issue Triage"
+        "category": "Issue Triage",
+        "icon": "$(sign-out)"
       },
       {
         "command": "issuetriage.sendToAutomation",
