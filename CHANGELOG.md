@@ -4,7 +4,6 @@ All notable changes to the "issuetriage" extension will be documented in this fi
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
-## [0.0.1] - 2025-10-17
+## [0.0.12] - 2025-11-09
 
 - Initial release with the Issue Triage webview dashboard
-- Added CLI context orchestrator with a built-in workspace snapshot tool feeding assessments via prompt context

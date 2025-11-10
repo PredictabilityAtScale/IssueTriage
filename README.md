@@ -6,19 +6,21 @@ IssueTriage turns every GitHub backlog into an automation-ready funnel. Inside V
 
 ![IssueTriage Webview Panel](images/IssueTriage_panel2.png)
 
-## Why Teams Use IssueTriage
+## Why Use IssueTriage
 
 - **Prioritize by evidence** – Composite readiness scores combine requirements clarity, code complexity, security sensitivity, and business impact.
 - **Catch hidden risk** – Linked pull requests, change volume, and review friction automatically temper optimistic scores.
 - **Work where you code** – Native sidebar views, commands, and status bar entry points for both VS Code and Cursor.
 - **Stay in control** – All assessment and risk data is stored locally in SQLite; you decide whether to publish results back to GitHub.
-
-### Built for Technical Leads
-
 - Deep GitHub integration: issues, labels, assignees, milestones, linked PRs, commit history.
-- Flexible LLM routing: remote Cloudflare worker proxy or direct OpenRouter calls with your own key.
-- CLI tool orchestration: attach workspace diagnostics and custom scripts to assessment prompts.
-- Optional UsageTap telemetry: track LLM usage while honoring opt-out preferences.
+- Flexible LLM routing (50 assessments free per month): Use our API AI key (limited to 50 issues a month) or direct OpenRouter calls with your own key.
+- LLM Usage Tracking: Usage based tracking by [UsageTap](https://usagetap.com)
+
+## Why IssueTrage was developed
+
+- We wanted to **quickly assess a long backlog** of issues to find which ones were ready to develop using the AI coding tools. We set out to create the assessment model to determine when things are "AI development ready."
+- **"Plan Explosion."** We used planning mode and created solid specification files, but after a couple of weeks there were dozens of these documents that will NEVER be read again. Also, these documents lacked the Question and Answers given along the way. We wanted a record of the decisions, and we wanted to know when there were no more implementation questions. It seemed logical to keep these with the GitHub issues as comments.
+- **Risk Model."** We have an interest in assessing proposed issues risk and complexity. The data captured on prior issues and how well they were automated could help decide between what issues to do first. Low risk high or equal value first. We are just starting this journey, and you will see Risk Analysis and the ability to download a ML training data to train your own model. 
 
 ## Architecture at a Glance
 
@@ -46,8 +48,6 @@ IssueTriage turns every GitHub backlog into an automation-ready funnel. Inside V
 - Inline quick actions: assess, refresh, send to automation.
 - Color-coded badges that mirror assessment readiness.
 
-![Sidebar Distribution Legend](images/IssueTriage-panel-legend.png)
-
 ### 3. Opportunity Mix Matrix
 
 - Scatter plot of business value vs. readiness using assessed issues only.
@@ -58,6 +58,22 @@ IssueTriage turns every GitHub backlog into an automation-ready funnel. Inside V
 - Guided checklist for automation readiness questions, each with AI-assisted answers and follow-up prompts.
 
 ![Assessment Question Flow](images/IssueTriage_assessment_question.png)
+
+
+## GitHub oAuth Authentication (first time used)
+To use IssueTriage you need to authenticate with GitHub. To get connected:
+1. Install the IssueTriage extension by clicking on the Extensions side bar or View - Extensions from the menu (VSCode & Cursor), searching for IssueTriage and clicking install
+2. Click on the IssueTriage diamond icon in the sidebar (vscode)
+3. Click on the **Connect to Github** button in the side panel or the extensions main panel
+4. You will be redirected to GitHub for "Device Activation" - select the right account and click continue.
+5. You will be asked for an 8 digit code. Go back to your VSCode or Cursor and there will be a notification in the footer (click on the notification bell very bottom right of your VSCode or Cursor) window. Copy the code and enter it in the GitHub device activation window
+<br />![Copy code](images/IssueTriage-CopyCode.png)
+<br />![Github Auth](images/IssueTriage-GithubAuth.png)
+6. You will then be asked to authorize PredictabilityAtScale (thats us). REassess your life choices and click Agree/Yes. If you have 2FA (and we hope you do) you may be asked to further authenticate; Do the steps asked.
+
+If successful you will see a "Congratulations" message and you can return to VSCode or Cursor.
+
+NOTE: You may need to click Refresh or choose a different repository by clicking on the repo name and selecting from the drop-down of all repos listed. We try and choose the repo matching your open folder repo. If no issues are showing just click the refresh button on the same row as the IssueTriage panel name.
 
 ## Workflow
 
@@ -178,7 +194,7 @@ Risk intelligence multiplies composite scores by **0.8** (high risk) or **0.9** 
 - Network access to `github.com` and OpenRouter (or your configured proxy).
 - Optional: OpenRouter API key for local LLM mode.
 
-## Release Notes (0.0.11)
+## Release Notes (0.0.12)
 
 - Opportunity Mix matrix webview inside the sidebar.
 - Expanded assessment panel with risk intelligence, automation guard, and history timeline.
