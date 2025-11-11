@@ -22,6 +22,18 @@ IssueTriage turns every GitHub backlog into an automation-ready funnel. Inside V
 - **"Plan Explosion."** We used planning mode and created solid specification files, but after a couple of weeks there were dozens of these documents that will NEVER be read again. Also, these documents lacked the Question and Answers given along the way. We wanted a record of the decisions, and we wanted to know when there were no more implementation questions. It seemed logical to keep these with the GitHub issues as comments.
 - **Risk Model."** We have an interest in assessing proposed issues risk and complexity. The data captured on prior issues and how well they were automated could help decide between what issues to do first. Low risk high or equal value first. We are just starting this journey, and you will see Risk Analysis and the ability to download a ML training data to train your own model. 
 
+## Installation
+
+### VSCode Marketplace
+See our listing here [Visual studio marketplace](https://marketplace.visualstudio.com/items?itemName=PredictabilityAtScale.issuetriage)
+
+### OpenVSX
+See our listing here [OpenVSX Marketplace](https://open-vsx.org/extension/PredictabilityAtScale/issuetriage)
+
+### Cursor marketplace (coming soon)
+We are getting approved.
+Until then, go to the OpenVSX listing and download the VSIX file. Open your View-Extensions  menu and install this VSIX manually.
+
 ## Architecture at a Glance
 
 | Layer | What It Does |

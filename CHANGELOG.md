@@ -7,3 +7,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 ## [0.0.12] - 2025-11-09
 
 - Initial release with the Issue Triage webview dashboard
+
+## [0.0.13] - 2025-11-10
+
+- Updated readme with GitHub Auth details
