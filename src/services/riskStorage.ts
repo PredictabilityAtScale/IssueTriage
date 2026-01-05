@@ -294,6 +294,7 @@ export class RiskStorage implements RiskProfileStore {
 			issue_labels TEXT,
 			change_summary TEXT,
 			file_changes TEXT,
+			comment_id INTEGER,
 			UNIQUE(repository, issue_number)
 		);`);
 		db.run(`CREATE INDEX IF NOT EXISTS idx_risk_profiles_repo_issue ON risk_profiles (repository, issue_number);`);

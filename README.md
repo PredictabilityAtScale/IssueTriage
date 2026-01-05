@@ -30,7 +30,7 @@ See our listing here [Visual studio marketplace](https://marketplace.visualstudi
 ### OpenVSX
 See our listing here [OpenVSX Marketplace](https://open-vsx.org/extension/PredictabilityAtScale/issuetriage)
 
-### Cursor marketplace (coming soon)
+### Cursor marketplace
 We are getting approved.
 Until then, go to the OpenVSX listing and download the VSIX file. Open your View-Extensions  menu and install this VSIX manually.
 
@@ -147,6 +147,8 @@ Tokens supported: `${workspaceRoot}`, `${workspaceFolder}`, `${extensionRoot}`.
   "issuetriage.risk.publishComments": true
 }
 ```
+
+> Closed issue coverage: on a fresh install IssueTriage rehydrates any prior risk comments and offers to analyze the 25 most recently closed issues so your backlog starts with populated risk profiles.
 
 ### Automation Launch Guard
 

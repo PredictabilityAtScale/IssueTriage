@@ -1,7 +1,7 @@
 import { AssessmentStorage, AssessmentRecord } from './assessmentStorage';
 import { SettingsService } from './settingsService';
 import { TelemetryService } from './telemetryService';
-import { GitHubClient, IssueDetail } from './githubClient';
+import { GitHubClient, IssueDetail, IssueSummary } from './githubClient';
 import { CliToolService } from './cliToolService';
 import { RiskIntelligenceService } from './riskIntelligenceService';
 import { LlmGateway, MissingApiKeyError, LOCAL_API_KEY_MISSING_MESSAGE } from './llmGateway';
@@ -10,6 +10,17 @@ import type { UsageTapOperationHooks, UsageTapService } from './usageTapService'
 import { UsageLimitExceededError } from './usageTapService';
 
 const COMMENT_TAG = '<!-- IssueTriage Assessment -->';
+
+interface ParsedAssessmentComment {
+	compositeScore: number;
+	requirementsScore: number;
+	complexityScore: number;
+	securityScore: number;
+	businessScore: number;
+	summary: string;
+	recommendations: string[];
+	model: string;
+}
 
 interface AssessmentModelPayload {
 	summary: string;
@@ -157,6 +168,100 @@ export class AssessmentService {
 			});
 			throw new AssessmentError('storageError', 'Unable to read assessment history from local storage.', { cause: error instanceof Error ? error : undefined });
 		}
+	}
+
+	public async getUnhydratedIssues(repository: string, issues: IssueSummary[], limit = 50): Promise<IssueSummary[]> {
+		const candidates: IssueSummary[] = [];
+		for (const issue of issues) {
+			try {
+				const latest = await this.storage.getLatestAssessment(repository, issue.number);
+				if (!latest) {
+					candidates.push(issue);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.telemetry.trackEvent('assessment.hydrate.lookupFailed', {
+					repository,
+					issue: String(issue.number),
+					message
+				});
+			}
+		}
+
+		if (!candidates.length) {
+			return [];
+		}
+
+		const sorted = [...candidates].sort((a, b) => {
+			const left = Date.parse(b.updatedAt ?? '') || 0;
+			const right = Date.parse(a.updatedAt ?? '') || 0;
+			return left - right;
+		});
+
+		return sorted.slice(0, Math.max(0, limit));
+	}
+
+	public async hydrateAssessmentsFromGitHub(
+		repository: string,
+		issues: IssueSummary[],
+		onProgress?: (completed: number, total: number, issueNumber: number) => void
+	): Promise<number> {
+		if (!issues.length) {
+			return 0;
+		}
+
+		let hydrated = 0;
+		const total = issues.length;
+		for (let index = 0; index < issues.length; index += 1) {
+			onProgress?.(index, total, issues[index].number);
+			const issue = issues[index];
+			try {
+				const detail = await this.github.getIssueDetails(repository, issue.number);
+				const comment = this.findLatestAssessmentComment(detail);
+				if (!comment) {
+					continue;
+				}
+				const parsed = this.parseAssessmentComment(comment.body);
+				if (!parsed) {
+					this.telemetry.trackEvent('assessment.hydrate.parseSkipped', {
+						repository,
+						issue: String(issue.number)
+					});
+					continue;
+				}
+				const createdAt = comment.updatedAt ?? comment.createdAt ?? new Date().toISOString();
+				await this.storage.saveAssessment({
+					repository,
+					issueNumber: issue.number,
+					compositeScore: parsed.compositeScore,
+					requirementsScore: parsed.requirementsScore,
+					complexityScore: parsed.complexityScore,
+					securityScore: parsed.securityScore,
+					businessScore: parsed.businessScore,
+					recommendations: parsed.recommendations,
+					summary: parsed.summary,
+					model: parsed.model,
+					commentId: comment.id,
+					createdAt,
+					rawResponse: undefined
+				});
+				this.telemetry.trackEvent('assessment.hydrate.saved', {
+					repository,
+					issue: String(issue.number)
+				});
+				hydrated += 1;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.telemetry.trackEvent('assessment.hydrate.failed', {
+					repository,
+					issue: String(issue.number),
+					message
+				});
+			}
+		}
+
+		onProgress?.(total, total, issues[issues.length - 1]?.number ?? 0);
+		return hydrated;
 	}
 
 	public isAutomationLaunchEnabled(): boolean {
@@ -308,7 +413,8 @@ export class AssessmentService {
 
 		const requested = this.usageTap.resolveRequestedEntitlements(model);
 		const sanitizedRepo = repository.replace(/[^a-z0-9-_.]/gi, '_');
-		const idempotency = `assessment:${sanitizedRepo}:${issueNumber}`;
+		const runSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		const idempotency = `assessment:${sanitizedRepo}:${issueNumber}:${runSuffix}`;
 		const tags = ['assessment', repository];
 
 		// Only enforce standard call limits when using remote mode (no user API key)
@@ -470,5 +576,76 @@ export class AssessmentService {
 			return 0;
 		}
 		return Math.min(100, Math.max(0, Number.parseFloat(numeric.toFixed(1))));
+	}
+
+	private findLatestAssessmentComment(issue: IssueDetail): IssueDetail['comments'][number] | undefined {
+		const matches = issue.comments.filter(comment => typeof comment.body === 'string' && comment.body.includes(COMMENT_TAG));
+		if (!matches.length) {
+			return undefined;
+		}
+		return matches
+			.slice()
+			.sort((a, b) => {
+				const left = Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0;
+				const right = Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0;
+				return left - right;
+			})[0];
+	}
+
+	private parseAssessmentComment(body: string): ParsedAssessmentComment | undefined {
+		if (typeof body !== 'string' || !body.includes(COMMENT_TAG)) {
+			return undefined;
+		}
+		const normalized = body.replace(/\r\n/g, '\n');
+		const modelMatch = normalized.match(/_Model_:\s*(.+)/);
+		const summaryMatch = normalized.match(/\*\*Summary:\*\*\s*(.+)/);
+		const dimensionRegex = /\|\s*([^|]+?)\s*\|\s*([0-9]+(?:\.[0-9]+)?)\s*\|/g;
+		const dimensionMap = new Map<string, 'compositeScore' | 'requirementsScore' | 'complexityScore' | 'securityScore' | 'businessScore'>([
+			['Composite', 'compositeScore'],
+			['Requirements', 'requirementsScore'],
+			['Complexity', 'complexityScore'],
+			['Security', 'securityScore'],
+			['Business Impact', 'businessScore']
+		]);
+		const extractedScores: Partial<Record<'compositeScore' | 'requirementsScore' | 'complexityScore' | 'securityScore' | 'businessScore', number>> = {};
+		for (const match of normalized.matchAll(dimensionRegex)) {
+			const label = match[1]?.trim();
+			const value = Number.parseFloat(match[2] ?? '0');
+			const key = label ? dimensionMap.get(label) : undefined;
+			if (key && Number.isFinite(value)) {
+				extractedScores[key] = this.sanitizeScore(value);
+			}
+		}
+
+		if (
+			typeof extractedScores.compositeScore !== 'number'
+			|| typeof extractedScores.requirementsScore !== 'number'
+			|| typeof extractedScores.complexityScore !== 'number'
+			|| typeof extractedScores.securityScore !== 'number'
+			|| typeof extractedScores.businessScore !== 'number'
+			|| !summaryMatch
+		) {
+			return undefined;
+		}
+
+		const recommendationSection = normalized.split('**Pre-implementation questions:**')[1] ?? '';
+		const recommendationLines = recommendationSection
+			.split('\n')
+			.map(line => line.trim())
+			.filter(line => line.startsWith('- '));
+		const recommendations = recommendationLines
+			.map(line => line.replace(/^-\s*/, '').trim())
+			.filter(line => line.length > 0 && !/^No open questions identified\.?$/i.test(line));
+
+		return {
+			compositeScore: extractedScores.compositeScore,
+			requirementsScore: extractedScores.requirementsScore,
+			complexityScore: extractedScores.complexityScore,
+			securityScore: extractedScores.securityScore,
+			businessScore: extractedScores.businessScore,
+			summary: summaryMatch[1]?.trim() ?? '',
+			recommendations,
+			model: modelMatch?.[1]?.trim() ?? 'unknown'
+		};
 	}
 }

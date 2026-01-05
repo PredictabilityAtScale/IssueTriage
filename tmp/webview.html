@@ -198,6 +198,18 @@
 					gap: 6px;
 				}
 
+				.issue-action-row {
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					margin: 8px 0 6px;
+				}
+
+				.issue-action-status {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground);
+				}
+
 				.issue-action {
 					padding: 4px 10px;
 					font-size: 12px;
@@ -803,15 +815,23 @@
 					const updatedText = new Date(issue.updatedAt).toLocaleString();
 					const riskSummary = getRiskSummary(issue.number);
 					const riskBadge = renderRiskBadge(riskSummary);
-					const header = '<div class="issue-card-header"><div class="issue-card-title"><h3>#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + (riskBadge || '') + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
-					const labelRow = labelBadges ? '<div class="meta-row">' + labelBadges + '</div>' : '';
-					return '<article class="issue-card" data-issue-number="' + issue.number + '" data-url="' + issue.url + '">' +
-						header +
+					const header = '<div class="issue-card-header"><div class="issue-card-title"><h3>#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + (riskBadge || '') + '</div></div>';
+					const actionRow =
+						'<div class="issue-action-row">' +
+							'<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button>' +
+							'<button type="button" class="issue-action" data-action="copyForAgent" data-issue-number="' + issue.number + '">Copy for AI Coding Agent</button>' +
+						'</div>';
+					const metadataRow =
 						'<div class="meta-row">' +
 							'<span>Updated ' + updatedText + '</span>' +
 							(assigneeText ? '<span>' + assigneeText + '</span>' : '') +
 							(milestoneText ? '<span>' + milestoneText + '</span>' : '') +
-						'</div>' +
+						'</div>';
+					const labelRow = labelBadges ? '<div class="meta-row">' + labelBadges + '</div>' : '';
+					return '<article class="issue-card" data-issue-number="' + issue.number + '" data-url="' + issue.url + '">' +
+						header +
+						actionRow +
+						metadataRow +
 						labelRow +
 					'</article>';
 				}

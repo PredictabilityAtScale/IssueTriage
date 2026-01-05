@@ -5,10 +5,11 @@ import type {
 	PullRequestRiskData,
 	CommitRiskData,
 	PullRequestBackfillDetail,
-	CommitBackfillDetail
+	CommitBackfillDetail,
+	IssueDetail
 } from './githubClient';
 import type { RiskProfileStore } from './riskStorage';
-import type { RiskProfile, RiskSummary, RiskMetrics, RiskLevel, RiskFileChange } from '../types/risk';
+import type { RiskProfile, RiskSummary, RiskMetrics, RiskLevel, RiskFileChange, RiskEvidence } from '../types/risk';
 import type { KeywordExtractionService } from './keywordExtractionService';
 import { ensureKeywordCoverage } from './keywordUtils';
 import type { KeywordContext } from './keywordUtils';
@@ -23,20 +24,7 @@ interface TelemetryClient {
 
 interface GitHubIssueClient {
 	getIssueRiskSnapshot(repository: string, issueNumber: number): Promise<IssueRiskSnapshot>;
-	getIssueDetails(repository: string, issueNumber: number): Promise<{
-		number: number;
-		title: string;
-		body: string;
-		url: string;
-		repository: string;
-		author: string;
-		labels: string[];
-		assignees: string[];
-		milestone?: string;
-		updatedAt: string;
-		createdAt?: string;
-		state: 'open' | 'closed';
-	}>;
+	getIssueDetails(repository: string, issueNumber: number): Promise<IssueDetail>;
 	getPullRequestBackfillDetail(repository: string, pullNumber: number): Promise<PullRequestBackfillDetail>;
 	getCommitBackfillDetail(repository: string, sha: string): Promise<CommitBackfillDetail>;
 	upsertIssueComment(repository: string, issueNumber: number, body: string, commentId?: number): Promise<number | undefined>;
@@ -48,7 +36,22 @@ type RiskTask = {
 	updatedAt?: string;
 	lookbackDays: number;
 	labelFilters: string[];
+	force?: boolean;
 };
+
+interface ParsedRiskComment {
+	riskLevel: RiskLevel;
+	riskScore: number;
+	metrics: RiskMetrics;
+	evidence: RiskEvidence[];
+	drivers: string[];
+	keywords?: string[];
+	lookbackDays?: number;
+	labelFilters?: string[];
+	calculatedAt?: string;
+	changeSummary?: string;
+	fileChanges?: RiskFileChange[];
+}
 
 export interface RiskUpdateEvent {
 	repository: string;
@@ -59,6 +62,7 @@ export interface RiskUpdateEvent {
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const HYDRATION_DELAY_MS = 750;
+const RISK_COMMENT_TAG = '<!-- IssueTriage Risk Intelligence -->';
 
 export class RiskIntelligenceService implements vscode.Disposable {
 	private readonly summaryCache = new Map<string, Map<number, RiskSummary>>();
@@ -133,6 +137,124 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		return this.storage.getKeywordCoverage(repository);
 	}
 
+	public async getProfileCount(repository: string): Promise<number> {
+		const coverage = await this.getKeywordCoverage(repository);
+		return coverage.total;
+	}
+
+	public async findIssuesMissingProfiles(repository: string, issues: IssueSummary[]): Promise<IssueSummary[]> {
+		if (!issues.length) {
+			return [];
+		}
+		await this.storage.initialize();
+		const unique = this.dedupeIssues(issues);
+		const stored = await this.storage.getProfiles(repository, unique.map(issue => issue.number));
+		const existing = new Set(stored.map(profile => profile.issueNumber));
+		return unique.filter(issue => !existing.has(issue.number));
+	}
+
+	public async hydrateProfilesFromGitHub(repository: string, issues: IssueSummary[], options: { limit?: number } = {}): Promise<number> {
+		if (!issues.length) {
+			return 0;
+		}
+		await this.storage.initialize();
+		const normalizedRepo = this.normalizeRepository(repository);
+		const unique = this.dedupeIssues(issues);
+		const limit = typeof options.limit === 'number' && options.limit > 0
+			? Math.min(options.limit, unique.length)
+			: unique.length;
+		const slice = unique.slice(0, limit);
+		const stored = await this.storage.getProfiles(repository, slice.map(issue => issue.number));
+		const existing = new Set(stored.map(profile => profile.issueNumber));
+		let hydrated = 0;
+		for (const issue of slice) {
+			if (existing.has(issue.number)) {
+				continue;
+			}
+			try {
+				const detail = await this.github.getIssueDetails(repository, issue.number);
+				const comment = this.findLatestRiskComment(detail);
+				if (!comment) {
+					continue;
+				}
+				const parsed = this.parseRiskComment(comment.body);
+				if (!parsed) {
+					this.telemetry.trackEvent('risk.hydrate.parseSkipped', {
+						repository,
+						issue: String(issue.number)
+					});
+					continue;
+				}
+				const profile: RiskProfile = {
+					repository,
+					issueNumber: issue.number,
+					riskLevel: parsed.riskLevel,
+					riskScore: parsed.riskScore,
+					metrics: parsed.metrics,
+					evidence: parsed.evidence,
+					drivers: parsed.drivers,
+					lookbackDays: parsed.lookbackDays ?? this.getLookbackDays(),
+					labelFilters: parsed.labelFilters ?? this.getLabelFilters(),
+					calculatedAt: parsed.calculatedAt ?? new Date().toISOString(),
+					keywords: parsed.keywords,
+					issueTitle: detail.title,
+					issueSummary: this.buildIssueSummary(detail.body),
+					issueLabels: detail.labels,
+					changeSummary: parsed.changeSummary ?? '',
+					fileChanges: parsed.fileChanges ?? [],
+					commentId: comment.id
+				};
+				await this.storage.saveProfile(profile);
+				this.cacheProfile(normalizedRepo, profile);
+				const summary = this.toSummary(profile, false);
+				this.cacheSummary(normalizedRepo, issue.number, summary);
+				this.emitUpdate(repository, issue.number, summary, profile);
+				hydrated += 1;
+				this.telemetry.trackEvent('risk.hydrate.saved', {
+					repository,
+					issue: String(issue.number)
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.telemetry.trackEvent('risk.hydrate.failed', {
+					repository,
+					issue: String(issue.number),
+					message
+				});
+			}
+		}
+		return hydrated;
+	}
+
+	public queueHydration(repository: string, issues: IssueSummary[], options: { force?: boolean } = {}): void {
+		if (!issues.length) {
+			return;
+		}
+		const lookbackDays = this.getLookbackDays();
+		const labelFilters = this.getLabelFilters();
+		const repoKey = this.normalizeRepository(repository);
+		for (const issue of this.dedupeIssues(issues)) {
+			const pending: RiskSummary = {
+				status: 'pending',
+				message: 'Collecting historical risk signals…'
+			};
+			this.cacheSummary(repoKey, issue.number, pending);
+			this.emitUpdate(repository, issue.number, pending);
+			this.enqueue({
+				repository,
+				issueNumber: issue.number,
+				updatedAt: issue.updatedAt,
+				lookbackDays,
+				labelFilters,
+				force: options.force ?? false
+			});
+		}
+		this.processQueue().catch(error => {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('risk.queue.processFailed', { repository, message });
+		});
+	}
+
 	public async waitForIdle(timeoutMs = 10_000): Promise<void> {
 		const start = Date.now();
 		while (!this.disposed && (this.processing || this.queue.length > 0)) {
@@ -186,13 +308,13 @@ export class RiskIntelligenceService implements vscode.Disposable {
 
 	private shouldSkip(issue: IssueSummary, lookbackDays: number, labelFilters: string[]): string | undefined {
 		const updatedAt = Date.parse(issue.updatedAt);
-		if (Number.isFinite(updatedAt)) {
+		if (issue.state !== 'closed' && Number.isFinite(updatedAt)) {
 			const lookbackMs = lookbackDays * 24 * 60 * 60 * 1000;
 			if (Date.now() - updatedAt > lookbackMs) {
 				return `Outside lookback window (${lookbackDays}d).`;
 			}
 		}
-		if (labelFilters.length) {
+		if (issue.state !== 'closed' && labelFilters.length) {
 			const labelsLower = issue.labels.map(label => label.toLowerCase());
 			const hasMatch = labelFilters.some(filter => labelsLower.some(label => label.includes(filter)));
 			if (!hasMatch) {
@@ -283,6 +405,7 @@ export class RiskIntelligenceService implements vscode.Disposable {
 
 		try {
 			const snapshot = await this.github.getIssueRiskSnapshot(task.repository, task.issueNumber);
+			const previousProfile = await this.storage.getProfile(task.repository, task.issueNumber);
 			const pullRequests = snapshot.pullRequests ?? [];
 			const commits = snapshot.commits ?? [];
 			if (pullRequests.length === 0 && commits.length === 0) {
@@ -298,24 +421,33 @@ export class RiskIntelligenceService implements vscode.Disposable {
 				});
 				return;
 			}
+			const issueDetail = await this.github.getIssueDetails(task.repository, task.issueNumber);
+			const existingComment = this.findLatestRiskComment(issueDetail);
+			const parsedComment = existingComment ? this.parseRiskComment(existingComment.body) : undefined;
+			const reuseCommentId = !task.force;
+			const commentId = reuseCommentId ? (previousProfile?.commentId ?? existingComment?.id) : undefined;
+			const allowKeywordExtraction = !previousProfile && !existingComment;
 
-			// Get previous profile to retrieve existing commentId
-			const previousProfile = await this.storage.getProfile(task.repository, task.issueNumber);
-			const profile = await this.buildProfile(task, snapshot, previousProfile?.commentId);
+			const profile = await this.buildProfile(task, snapshot, issueDetail, {
+				previousProfile,
+				parsedComment,
+				commentId,
+				allowKeywordExtraction
+			});
 
 			// Post comment to GitHub if enabled
 			const publishComments = this.shouldPublishComments();
 			if (publishComments) {
 				try {
 					const markdown = this.buildRiskComment(profile);
-					const commentId = await this.github.upsertIssueComment(
+					const postedCommentId = await this.github.upsertIssueComment(
 						task.repository,
 						task.issueNumber,
 						markdown,
 						profile.commentId
 					);
-					if (commentId) {
-						profile.commentId = commentId;
+					if (postedCommentId) {
+						profile.commentId = postedCommentId;
 					}
 				} catch (commentError) {
 					this.telemetry.trackEvent('risk.commentFailed', {
@@ -353,7 +485,17 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		}
 	}
 
-	private async buildProfile(task: RiskTask, snapshot: IssueRiskSnapshot, commentId?: number): Promise<RiskProfile> {
+	private async buildProfile(
+		task: RiskTask,
+		snapshot: IssueRiskSnapshot,
+		issue: IssueDetail,
+		options: {
+			previousProfile?: RiskProfile;
+			parsedComment?: ParsedRiskComment;
+			commentId?: number;
+			allowKeywordExtraction: boolean;
+		}
+	): Promise<RiskProfile> {
 		const pullRequests = snapshot.pullRequests ?? [];
 		const commits = snapshot.commits ?? [];
 		const metrics = this.computeMetrics(pullRequests, commits);
@@ -361,7 +503,6 @@ export class RiskIntelligenceService implements vscode.Disposable {
 		const riskLevel = this.scoreToLevel(riskScore);
 		const drivers = this.identifyDrivers(metrics);
 		const evidence = this.buildEvidence(pullRequests, commits);
-		const issue = await this.github.getIssueDetails(task.repository, task.issueNumber);
 		const fileChanges = await this.collectFileChanges(task.repository, pullRequests, commits);
 		const issueSummary = this.buildIssueSummary(issue.body);
 		const changeSummary = this.buildChangeSummary(metrics, evidence, fileChanges);
@@ -375,10 +516,14 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			repository: task.repository
 		};
 
-		let keywords = this.keywordExtractor ? await this.tryExtractKeywords(task, issue.title, issue.body, keywordContext) : undefined;
-		if (!keywords || keywords.length === 0) {
-			keywords = ensureKeywordCoverage(undefined, keywordContext);
+		let keywords = options.previousProfile?.keywords ?? options.parsedComment?.keywords;
+		if (this.keywordExtractor && options.allowKeywordExtraction) {
+			const extracted = await this.tryExtractKeywords(task, issue.title, issue.body, keywordContext);
+			if (extracted && extracted.length > 0) {
+				keywords = extracted;
+			}
 		}
+		const coveredKeywords = ensureKeywordCoverage(keywords, keywordContext);
 
 		return {
 			repository: task.repository,
@@ -391,13 +536,13 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			lookbackDays: task.lookbackDays,
 			labelFilters: task.labelFilters,
 			calculatedAt: new Date().toISOString(),
-			keywords: keywords.length ? keywords : undefined,
+			keywords: coveredKeywords.length ? coveredKeywords : undefined,
 			issueTitle: issue.title,
 			issueSummary,
 			issueLabels: issue.labels,
 			changeSummary,
 			fileChanges,
-			commentId
+			commentId: options.commentId
 		};
 	}
 
@@ -694,9 +839,16 @@ export class RiskIntelligenceService implements vscode.Disposable {
 			evidenceLines.push(`- ${link}${detail}`);
 		}
 
-		const keywordLines = profile.keywords && profile.keywords.length
-			? [`**Keywords:** ${profile.keywords.join(', ')}`]
-			: [];
+		const keywordLines: string[] = [];
+		if (profile.keywords && profile.keywords.length) {
+			const uniqueKeywords = Array.from(new Set(profile.keywords.map(keyword => keyword.trim()).filter(Boolean)));
+			if (uniqueKeywords.length) {
+				keywordLines.push('**Keywords:**');
+				for (const keyword of uniqueKeywords) {
+					keywordLines.push(`- ${keyword}`);
+				}
+			}
+		}
 
 		return [
 			'<!-- IssueTriage Risk Intelligence -->',
@@ -760,6 +912,223 @@ export class RiskIntelligenceService implements vscode.Disposable {
 	private shouldPublishComments(): boolean {
 		const configured = this.settings.get<boolean>('risk.publishComments');
 		return configured !== false; // Default to true
+	}
+
+	private dedupeIssues(issues: IssueSummary[]): IssueSummary[] {
+		const map = new Map<number, IssueSummary>();
+		for (const issue of issues) {
+			const existing = map.get(issue.number);
+			if (!existing) {
+				map.set(issue.number, issue);
+				continue;
+			}
+			const existingTime = Date.parse(existing.updatedAt) || 0;
+			const candidateTime = Date.parse(issue.updatedAt) || 0;
+			if (candidateTime > existingTime) {
+				map.set(issue.number, issue);
+			}
+		}
+		return Array.from(map.values()).sort((a, b) => {
+			const left = Date.parse(b.updatedAt) || 0;
+			const right = Date.parse(a.updatedAt) || 0;
+			return left - right;
+		});
+	}
+
+	private findLatestRiskComment(issue: { comments?: Array<{ id: number; body: string; updatedAt?: string; createdAt?: string }> }): { id: number; body: string; updatedAt?: string; createdAt?: string } | undefined {
+		const comments = issue.comments ?? [];
+		const matches = comments.filter(comment => typeof comment.body === 'string' && comment.body.includes(RISK_COMMENT_TAG));
+		if (!matches.length) {
+			return undefined;
+		}
+		return matches
+			.slice()
+			.sort((a, b) => {
+				const timeA = Date.parse(a.updatedAt ?? a.createdAt ?? '') || 0;
+				const timeB = Date.parse(b.updatedAt ?? b.createdAt ?? '') || 0;
+				if (timeA !== timeB) {
+					return timeB - timeA;
+				}
+				const idA = typeof a.id === 'number' ? a.id : 0;
+				const idB = typeof b.id === 'number' ? b.id : 0;
+				return idB - idA;
+			})[0];
+	}
+
+	private parseRiskComment(body: string): ParsedRiskComment | undefined {
+		if (typeof body !== 'string' || !body.includes(RISK_COMMENT_TAG)) {
+			return undefined;
+		}
+		const normalized = body.replace(/\r/g, '');
+		const headerMatch = normalized.match(/\*\*(\w+)\s+risk\*\*\s*·\s*Score\s+([0-9]+(?:\.[0-9]+)?)/i);
+		if (!headerMatch) {
+			return undefined;
+		}
+		const riskLevelRaw = headerMatch[1]?.toLowerCase();
+		const level: RiskLevel = riskLevelRaw === 'high' || riskLevelRaw === 'medium' ? riskLevelRaw : 'low';
+		const riskScore = Number.parseFloat(headerMatch[2] ?? '0');
+		const calculatedMatch = normalized.match(/_Last updated:\s*([^_]+)_/i);
+		let calculatedAt: string | undefined;
+		if (calculatedMatch?.[1]) {
+			const timestamp = new Date(calculatedMatch[1]);
+			if (!Number.isNaN(timestamp.getTime())) {
+				calculatedAt = timestamp.toISOString();
+			}
+		}
+		const lookbackMatch = normalized.match(/_Analyzed\s+([0-9]+)\s+days of history_/i);
+		const lookbackDays = lookbackMatch ? Number.parseInt(lookbackMatch[1], 10) : undefined;
+
+		const metrics: RiskMetrics = {
+			prCount: this.extractFirstNumber(normalized, /-\s*([0-9]+)\s+linked pull requests?/i),
+			filesTouched: this.extractFirstNumber(normalized, /-\s*([0-9]+)\s+files?\s+touched/i),
+			totalAdditions: 0,
+			totalDeletions: 0,
+			changeVolume: this.extractFirstNumber(normalized, /-\s*([0-9]+)\s+lines?\s+changed/i),
+			reviewCommentCount: this.extractFirstNumber(normalized, /-\s*([0-9]+)\s+review friction signals?/i),
+			prReviewCommentCount: 0,
+			prDiscussionCommentCount: 0,
+			prChangeRequestCount: 0,
+			directCommitCount: this.extractFirstNumber(normalized, /-\s*([0-9]+)\s+direct commits?/i),
+			directCommitAdditions: 0,
+			directCommitDeletions: 0,
+			directCommitChangeVolume: 0
+		};
+
+		const labelFilters: string[] = [];
+		const drivers: string[] = [];
+		const evidence: RiskEvidence[] = [];
+		let keywords: string[] | undefined;
+		let changeSummary: string | undefined;
+		let fileChanges: RiskFileChange[] | undefined;
+		let section: 'none' | 'drivers' | 'evidence' | 'keywords' = 'none';
+		const lines = normalized.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+		for (const line of lines) {
+			if (section === 'keywords') {
+				if (line.startsWith('- ')) {
+					const keyword = line.slice(2).trim();
+					if (keyword) {
+						if (!keywords) {
+							keywords = [];
+						}
+						if (!keywords.includes(keyword)) {
+							keywords.push(keyword);
+						}
+					}
+					continue;
+				}
+				section = 'none';
+			}
+			if (line.startsWith('**Top drivers:**')) {
+				section = 'drivers';
+				continue;
+			}
+			if (line.startsWith('**Evidence:**')) {
+				section = 'evidence';
+				continue;
+			}
+			if (line.startsWith('**Keywords:**')) {
+				const keywordText = line.replace('**Keywords:**', '').trim();
+				if (keywordText) {
+					keywords = keywordText.split(',').map(kw => kw.trim()).filter(Boolean);
+					section = 'none';
+				} else {
+					if (!keywords) {
+						keywords = [];
+					}
+					section = 'keywords';
+				}
+				continue;
+			}
+			if (line.startsWith('Recent work:')) {
+				changeSummary = line;
+				continue;
+			}
+			if (line.startsWith('Focus areas:')) {
+				const paths = line.replace('Focus areas:', '').split(',').map(item => item.trim()).filter(Boolean);
+				if (paths.length) {
+					fileChanges = paths.map<RiskFileChange>(path => ({
+						path,
+						additions: 0,
+						deletions: 0,
+						changeVolume: 0,
+						references: []
+					}));
+				}
+				continue;
+			}
+			if (line.startsWith('**')) {
+				section = 'none';
+				continue;
+			}
+			if (section === 'drivers' && line.startsWith('- ')) {
+				drivers.push(line.slice(2).trim());
+				continue;
+			}
+			if (section === 'evidence' && line.startsWith('- ')) {
+				const evidenceItem = this.parseEvidenceLine(line);
+				if (evidenceItem) {
+					evidence.push(evidenceItem);
+				}
+			}
+		}
+
+		return {
+			riskLevel: level,
+			riskScore: Number.isFinite(riskScore) ? riskScore : 0,
+			metrics,
+			evidence,
+			drivers,
+			keywords: keywords && keywords.length ? keywords : undefined,
+			lookbackDays,
+			labelFilters,
+			calculatedAt,
+			changeSummary,
+			fileChanges
+		};
+	}
+
+	private extractFirstNumber(input: string, pattern: RegExp): number {
+		const match = input.match(pattern);
+		if (!match?.[1]) {
+			return 0;
+		}
+		const value = Number.parseInt(match[1], 10);
+		return Number.isFinite(value) ? value : 0;
+	}
+
+	private parseEvidenceLine(line: string): RiskEvidence | undefined {
+		const trimmed = line.replace(/^-\s*/, '');
+		const linkMatch = trimmed.match(/^\[(.+?)\]\((.+?)\)(?:\s*—\s*(.+))?$/);
+		const plainMatch = trimmed.match(/^([^—]+?)(?:\s*—\s*(.+))?$/);
+		let label: string | undefined;
+		let url: string | undefined;
+		let detail: string | undefined;
+		if (linkMatch) {
+			label = linkMatch[1]?.trim();
+			url = linkMatch[2]?.trim();
+			detail = linkMatch[3]?.trim();
+		} else if (plainMatch) {
+			label = plainMatch[1]?.trim();
+			detail = plainMatch[2]?.trim();
+		}
+		if (!label) {
+			return undefined;
+		}
+		const evidence: RiskEvidence = { label };
+		if (url) {
+			evidence.url = url;
+		}
+		if (detail) {
+			evidence.detail = detail;
+		}
+		const prNumberMatch = label.match(/PR\s+#([0-9]+)/i);
+		if (prNumberMatch?.[1]) {
+			const prNumber = Number.parseInt(prNumberMatch[1], 10);
+			if (Number.isFinite(prNumber)) {
+				evidence.prNumber = prNumber;
+			}
+		}
+		return evidence;
 	}
 }
 

@@ -606,6 +606,14 @@ export class GitHubClient {
 			}
 		}
 
+		results.sort((a, b) => {
+			const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+			const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+			const safeATime = Number.isFinite(aTime) ? aTime : 0;
+			const safeBTime = Number.isFinite(bTime) ? bTime : 0;
+			return safeBTime - safeATime;
+		});
+
 		this.storeInCache(this.unlinkedPullRequestCache, cacheKey, results);
 		return results;
 	}
@@ -682,6 +690,14 @@ export class GitHubClient {
 				break;
 			}
 		}
+
+		commits.sort((a, b) => {
+			const aTime = a.committedDate ? new Date(a.committedDate).getTime() : 0;
+			const bTime = b.committedDate ? new Date(b.committedDate).getTime() : 0;
+			const safeATime = Number.isFinite(aTime) ? aTime : 0;
+			const safeBTime = Number.isFinite(bTime) ? bTime : 0;
+			return safeBTime - safeATime;
+		});
 
 		this.storeInCache(this.unlinkedCommitCache, cacheKey, commits);
 		return commits;

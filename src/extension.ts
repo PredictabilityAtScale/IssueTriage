@@ -184,18 +184,26 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(openPanel);
 
+	let assessmentInProgress = false;
 	const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
 	statusBarItem.name = 'Issue Triage';
 	statusBarItem.command = 'issuetriage.openPanel';
 	const updateStatusBar = () => {
 		const mode = services.llmGateway.getMode();
 		const label = mode === 'remote' ? 'Remote Proxy' : 'Local Direct';
-		statusBarItem.text = `$(list-tree) Issue Triage (${label})`;
+		if (assessmentInProgress) {
+			statusBarItem.text = '$(sync~spin) Issue Triage (Assessing…)';
+		} else {
+			statusBarItem.text = `$(list-tree) Issue Triage (${label})`;
+		}
 		const tooltipLines = [
 			'Open the Issue Triage panel',
 			`LLM mode: ${label}`,
 			'GitHub auth: Cloudflare worker proxy'
 		];
+		if (assessmentInProgress) {
+			tooltipLines.push('Assessment in progress…');
+		}
 		if (mode === 'remote') {
 			tooltipLines.push(`Proxy endpoint: ${services.llmGateway.getRemoteBaseUrl()}`);
 		} else {
@@ -206,6 +214,15 @@ export function activate(context: vscode.ExtensionContext) {
 	updateStatusBar();
 	statusBarItem.show();
 	context.subscriptions.push(statusBarItem);
+	void vscode.commands.executeCommand('setContext', 'issuetriage.assessmentInProgress', false);
+	const setAssessmentInProgress = (value: boolean) => {
+		if (assessmentInProgress === value) {
+			return;
+		}
+		assessmentInProgress = value;
+		void vscode.commands.executeCommand('setContext', 'issuetriage.assessmentInProgress', value);
+		updateStatusBar();
+	};
 
 	const configurationSubscription = vscode.workspace.onDidChangeConfiguration(event => {
 		if (event.affectsConfiguration('issuetriage.assessment.llmMode') || event.affectsConfiguration('issuetriage.assessment.remoteEndpoint') || event.affectsConfiguration('issuetriage.assessment.apiKey')) {
@@ -225,6 +242,10 @@ export function activate(context: vscode.ExtensionContext) {
 		await services.issueManager.refreshIssues(true);
 	});
 	const assessIssue = vscode.commands.registerCommand('issuetriage.assessIssue', async (treeItemOrIssueNumber?: unknown, explicitIssueNumber?: number) => {
+		if (assessmentInProgress) {
+			void vscode.window.showInformationMessage('An assessment is already running. Please wait for it to finish.');
+			return;
+		}
 		const snapshot = services.issueManager.getSnapshot();
 		const repository = snapshot.selectedRepository;
 		if (!repository) {
@@ -273,24 +294,43 @@ export function activate(context: vscode.ExtensionContext) {
 			return;
 		}
 
-		IssueTriagePanel.createOrShow(services);
-
-		await vscode.window.withProgress({
-			title: `Assessing issue #${issueNumber}`,
-			location: vscode.ProgressLocation.Notification
-		}, async progress => {
-			progress.report({ message: 'Requesting analysis from LLM service' });
-			try {
-				const record = await services.assessment.assessIssue(repository.fullName, issueNumber);
-				const composite = record.compositeScore.toFixed(1);
-				IssueTriagePanel.broadcastAssessment(record);
-				void services.issueManager.refreshIssues(false);
-				vscode.window.showInformationMessage(`IssueTriage assessment complete for #${issueNumber} (Composite ${composite}).`);
-			} catch (error) {
-				const userMessage = formatAssessmentError(error);
-				vscode.window.showErrorMessage(`Assessment failed: ${userMessage}`);
+		const issue = issues.find(candidate => candidate.number === issueNumber)
+			?? services.issueManager.getAllIssues().find(candidate => candidate.number === issueNumber);
+		if (issue?.state === 'closed') {
+			const result = services.issueManager.analyzeRiskSignals(issueNumber, { force: true });
+			if (!result.success) {
+				if (result.message) {
+					void vscode.window.showWarningMessage(result.message);
+				}
+				return;
 			}
-		});
+			void vscode.window.showInformationMessage(`Collecting risk signals for issue #${issueNumber}.`);
+			return;
+		}
+
+		setAssessmentInProgress(true);
+		try {
+			IssueTriagePanel.createOrShow(services);
+
+			await vscode.window.withProgress({
+				title: `Assessing issue #${issueNumber}`,
+				location: vscode.ProgressLocation.Notification
+			}, async progress => {
+				progress.report({ message: 'Requesting analysis from LLM service' });
+				try {
+					const record = await services.assessment.assessIssue(repository.fullName, issueNumber);
+					const composite = record.compositeScore.toFixed(1);
+					IssueTriagePanel.broadcastAssessment(record);
+					void services.issueManager.refreshIssues(false);
+					vscode.window.showInformationMessage(`IssueTriage assessment complete for #${issueNumber} (Composite ${composite}).`);
+				} catch (error) {
+					const userMessage = formatAssessmentError(error);
+					vscode.window.showErrorMessage(`Assessment failed: ${userMessage}`);
+				}
+			});
+		} finally {
+			setAssessmentInProgress(false);
+		}
 	});
 
 	const runContextTool = vscode.commands.registerCommand('issuetriage.runContextTool', async () => {
@@ -1434,8 +1474,17 @@ class IssueTriagePanel {
 					justify-content: flex-end;
 				}
 
-				.issue-card-actions .issue-action {
-					margin-left: auto;
+				.issue-action-row {
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					flex-wrap: wrap;
+					margin: 8px 0 6px;
+				}
+
+				.issue-action-status {
+					font-size: 12px;
+					color: var(--vscode-descriptionForeground);
 				}
 
 				.issue-action {
@@ -1997,6 +2046,43 @@ class IssueTriagePanel {
 					font-size: 13px;
 				}
 
+				.ml-training-panel {
+					padding: 24px;
+					overflow-y: auto;
+					grid-column: 1 / -1;
+					box-sizing: border-box;
+				}
+
+				.ml-training-content {
+					max-width: 960px;
+					margin: 0 auto;
+					display: flex;
+					flex-direction: column;
+					gap: 24px;
+				}
+
+				.ml-training-content > h2 {
+					margin: 0;
+					font-size: 20px;
+					font-weight: 600;
+				}
+
+				.ml-description {
+					margin: 4px 0 16px 0;
+					font-size: 13px;
+					color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+				}
+
+				.ml-section {
+					padding: 16px;
+					border-radius: 8px;
+					border: 1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.35));
+					background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-button-background) 6%);
+					display: flex;
+					flex-direction: column;
+					gap: 12px;
+				}
+
 			.llm-usage-panel {
 				padding: 24px;
 				overflow-y: auto;
@@ -2507,7 +2593,7 @@ class IssueTriagePanel {
 				<button class="state-tab" id="unlinkedTab" aria-pressed="false">Unlinked</button>
 				<button class="state-tab" id="matrixTab" aria-pressed="false">Matrix</button>
 				<button class="state-tab" id="llmUsageTab" aria-pressed="false">LLM Usage</button>
-				<button class="state-tab" id="mlTrainingTab" aria-pressed="false" hidden>ML Training</button>
+				<button class="state-tab" id="mlTrainingTab" aria-pressed="false">ML Training</button>
 			</div>
 			<div class="container" id="mainContainer">
 				<div id="matrixPanel" class="matrix-panel" aria-label="Readiness matrix" hidden>
@@ -2926,6 +3012,21 @@ class IssueTriagePanel {
 					await vscode.env.openExternal(vscode.Uri.parse(message.url));
 				}
 				break;
+			case 'webview.analyzeRiskSignals': {
+				const issueNumber = this.parseIssueNumber(message.issueNumber);
+				if (issueNumber === undefined) {
+					break;
+				}
+				const result = this.services.issueManager.analyzeRiskSignals(issueNumber, { force: true });
+				if (!result.success) {
+					if (result.message) {
+						void vscode.window.showWarningMessage(result.message);
+					}
+					break;
+				}
+				void vscode.window.showInformationMessage(`Collecting risk signals for issue #${issueNumber}.`);
+				break;
+			}
 			case 'webview.answerAssessmentQuestion': {
 				const issueNumber = this.parseIssueNumber(message.issueNumber);
 				const rawQuestion = this.normalizeString(message.question)?.trim();
@@ -2971,6 +3072,24 @@ class IssueTriagePanel {
 				const repository = snapshot.selectedRepository?.fullName;
 				if (!repository) {
 					void vscode.window.showWarningMessage('Select a repository before running an assessment.');
+					break;
+				}
+				const issue = snapshot.issues.find(candidate => candidate.number === issueNumber)
+					?? this.services.issueManager.getAllIssues().find(candidate => candidate.number === issueNumber);
+				const viewingClosedIssues = issue?.state === 'closed' || snapshot.filters.state === 'closed';
+				if (viewingClosedIssues) {
+					const result = this.services.issueManager.analyzeRiskSignals(issueNumber, { force: true });
+					this.services.telemetry.trackEvent('assessment.quickRun.redirectedToRisk', {
+						repository,
+						issue: String(issueNumber)
+					});
+					if (!result.success) {
+						if (result.message) {
+							void vscode.window.showWarningMessage(result.message);
+						}
+						break;
+					}
+					void vscode.window.showInformationMessage(`Collecting risk signals for issue #${issueNumber}.`);
 					break;
 				}
 				this.panel.webview.postMessage({ type: 'assessment.loading', issueNumber });

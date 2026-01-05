@@ -67,6 +67,9 @@ class StubTelemetry {
 }
 
 class FakeGitHubClient {
+	public readonly upsertCalls: Array<{ repository: string; issueNumber: number; body: string; commentId?: number }> = [];
+	private commentCounter = 9000;
+
 	constructor(
 		private readonly snapshots: Map<string, IssueRiskSnapshot>,
 		private readonly issues: Map<string, IssueDetail>,
@@ -103,8 +106,32 @@ class FakeGitHubClient {
 	}
 
 	public async upsertIssueComment(repository: string, issueNumber: number, body: string, commentId?: number): Promise<number | undefined> {
-		// For testing, return a mock comment ID
-		return commentId ?? 999;
+		this.upsertCalls.push({ repository, issueNumber, body, commentId });
+		const key = `${repository}#${issueNumber}`;
+		const detail = this.issues.get(key);
+		const timestamp = new Date().toISOString();
+		if (detail) {
+			if (!Array.isArray(detail.comments)) {
+				detail.comments = [];
+			}
+			if (commentId) {
+				const existing = detail.comments.find(comment => comment.id === commentId);
+				if (existing) {
+					existing.body = body;
+					existing.updatedAt = timestamp;
+				} else {
+					detail.comments.push({ id: commentId, body, author: 'issue-triage-bot', createdAt: timestamp, updatedAt: timestamp });
+				}
+				return commentId;
+			}
+			const newId = ++this.commentCounter;
+			detail.comments.push({ id: newId, body, author: 'issue-triage-bot', createdAt: timestamp, updatedAt: timestamp });
+			return newId;
+		}
+		if (commentId) {
+			return commentId;
+		}
+		return ++this.commentCounter;
 	}
 
 	public static buildIssueDetail(issue: IssueSummary & { body?: string; author?: string }): IssueDetail {
@@ -319,5 +346,141 @@ suite('RiskIntelligenceService', () => {
 		assert.ok(summary);
 		assert.strictEqual(summary?.status, 'skipped');
 		assert.strictEqual(summary?.message, 'Outside lookback window (30d).');
+	});
+
+	test('forced hydration posts a new comment and rehydrates from the latest entry', async () => {
+		const store = new MemoryRiskStore();
+		const issueNumber = 404;
+		const priorCommentId = 7500;
+		const updatedAt = new Date().toISOString();
+		const issueSummary: IssueSummary = {
+			number: issueNumber,
+			title: 'Forced run issue',
+			url: 'https://example.com/issues/404',
+			labels: ['forced'],
+			assignees: [],
+			milestone: undefined,
+			updatedAt,
+			state: 'closed'
+		};
+		await store.saveProfile({
+			repository: 'owner/repo',
+			issueNumber,
+			riskLevel: 'medium',
+			riskScore: 50,
+			metrics: {
+				prCount: 1,
+				filesTouched: 4,
+				totalAdditions: 200,
+				totalDeletions: 40,
+				changeVolume: 240,
+				reviewCommentCount: 2,
+				prReviewCommentCount: 2,
+				prDiscussionCommentCount: 0,
+				prChangeRequestCount: 0,
+				directCommitCount: 0,
+				directCommitAdditions: 0,
+				directCommitDeletions: 0,
+				directCommitChangeVolume: 0
+			},
+			evidence: [],
+			drivers: ['Previous driver'],
+			lookbackDays: 180,
+			labelFilters: [],
+			calculatedAt: updatedAt,
+			keywords: ['forced', 'rerun'],
+			issueTitle: issueSummary.title,
+			issueSummary: 'Prior run summary',
+			issueLabels: issueSummary.labels,
+			changeSummary: 'Prior change summary',
+			fileChanges: [],
+			commentId: priorCommentId
+		});
+		const priorComment = [
+			'<!-- IssueTriage Risk Intelligence -->',
+			'### IssueTriage Risk Intelligence',
+			'**Medium risk** · Score 50',
+			'',
+			`_Last updated: ${updatedAt}_`,
+			'',
+			'**Key metrics:**',
+			'- 1 linked pull request',
+			'- 0 direct commits',
+			'- 4 files touched',
+			'- 240 lines changed',
+			'- 2 review friction signals',
+			'',
+			'**Top drivers:**',
+			'- Requires manual validation.',
+			'',
+			'**Evidence:**',
+			'- [PR #401](https://example.com/pr/401) — 4 files · +200/-40',
+			'',
+			'**Keywords:**',
+			'- forced',
+			'- rerun',
+			'',
+			'_Analyzed 180 days of history_'
+		].join('\n');
+		const issueDetail = FakeGitHubClient.buildIssueDetail({ ...issueSummary, body: 'Closed issue body.' });
+		issueDetail.comments = [
+			{
+				id: priorCommentId,
+				body: priorComment,
+				author: 'issue-triage-bot',
+				createdAt: updatedAt,
+				updatedAt
+			}
+		];
+		const pullRequests: PullRequestRiskData[] = [
+			{
+				number: 405,
+				title: 'Follow-up improvements',
+				url: 'https://example.com/pr/405',
+				state: 'closed',
+				mergedAt: updatedAt,
+				additions: 120,
+				deletions: 30,
+				changedFiles: 6,
+				commits: 2,
+				reviewComments: 3,
+				comments: 1,
+				reviewStates: { APPROVED: 1 },
+				createdAt: updatedAt,
+				updatedAt
+			}
+		];
+		const snapshot: IssueRiskSnapshot = { issueNumber, pullRequests, commits: [] };
+		const github = new FakeGitHubClient(
+			new Map([[`owner/repo#${issueNumber}`, snapshot]]),
+			new Map([[`owner/repo#${issueNumber}`, issueDetail]])
+		);
+		const settings = new StubSettings({ 'risk.lookbackDays': 180 });
+		const telemetry = new StubTelemetry();
+		const service = new RiskIntelligenceService(store, github as any, settings as any, telemetry);
+
+		service.queueHydration('owner/repo', [issueSummary], { force: true });
+		await service.waitForIdle();
+
+		assert.strictEqual(github.upsertCalls.length, 1);
+		assert.strictEqual(github.upsertCalls[0].commentId, undefined);
+		const updatedProfile = await store.getProfile('owner/repo', issueNumber);
+		assert.ok(updatedProfile);
+		assert.ok(updatedProfile?.commentId);
+		assert.notStrictEqual(updatedProfile?.commentId, priorCommentId);
+		assert.ok(updatedProfile?.keywords?.includes('forced'));
+		assert.ok(updatedProfile?.keywords?.includes('rerun'));
+		const detailAfter = await github.getIssueDetails('owner/repo', issueNumber);
+		const latestComment = detailAfter.comments ? detailAfter.comments[detailAfter.comments.length - 1] : undefined;
+		assert.strictEqual(latestComment?.id, updatedProfile?.commentId);
+		const secondStore = new MemoryRiskStore();
+		const secondService = new RiskIntelligenceService(secondStore, github as any, settings as any, telemetry);
+		const hydrated = await secondService.hydrateProfilesFromGitHub('owner/repo', [issueSummary]);
+		assert.strictEqual(hydrated, 1);
+		const rehydratedProfile = await secondStore.getProfile('owner/repo', issueNumber);
+		assert.ok(rehydratedProfile);
+		assert.strictEqual(rehydratedProfile?.commentId, updatedProfile?.commentId);
+		assert.ok(rehydratedProfile?.keywords?.includes('forced'));
+		assert.ok(rehydratedProfile?.keywords?.includes('rerun'));
 	});
 });

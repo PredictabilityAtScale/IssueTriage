@@ -83,15 +83,12 @@
 	const refreshBackfillButton = /** @type {HTMLButtonElement} */ (requireElement('refreshBackfill'));
 	
 	// Unlinked filter state
-	let unlinkedPrLimit = 50;
-	let unlinkedCommitLimit = 50;
+	let unlinkedPrLimit = 25;
+	let unlinkedCommitLimit = 25;
 	let unlinkedDateFilter = 'all';
 	const analysisActions = /** @type {HTMLElement} */ (requireElement('analysisActions'));
 	const runAnalysisButton = /** @type {HTMLButtonElement} */ (requireElement('runAnalysisButton'));
 	const mlTrainingPanel = /** @type {HTMLElement} */ (requireElement('mlTrainingPanel'));
-	mlTrainingTab.hidden = true;
-	mlTrainingTab.setAttribute('aria-hidden', 'true');
-	mlTrainingTab.setAttribute('disabled', 'true');
 	mlTrainingPanel.hidden = true;
 	mlTrainingPanel.style.display = 'none';
 	const matrixPanel = /** @type {HTMLElement} */ (requireElement('matrixPanel'));
@@ -199,6 +196,8 @@
 	let issueStateFilter = 'open';
 	/** @type {number | undefined} */
 	let searchDebounceHandle = undefined;
+	/** @type {Set<number>} */
+	const pendingAssessments = new Set();
 	let bulkAssessmentPending = false;
 	const pendingAnswers = new Set();
 	/** @type {any | undefined} */
@@ -738,13 +737,26 @@
 				latestState = message.state;
 				renderState(latestState);
 				break;
-			case 'assessment.loading':
-				if (message.issueNumber === selectedIssueNumber) {
+			case 'assessment.loading': {
+				const issueNumber = typeof message.issueNumber === 'number'
+					? message.issueNumber
+					: Number(message.issueNumber);
+				if (Number.isFinite(issueNumber)) {
+					setIssueAssessmentPending(issueNumber, true);
+				}
+				if (issueNumber === selectedIssueNumber) {
 					renderAssessmentLoading();
 				}
 				break;
-			case 'assessment.result':
-				if (message.issueNumber === selectedIssueNumber) {
+			}
+			case 'assessment.result': {
+				const issueNumber = typeof message.issueNumber === 'number'
+					? message.issueNumber
+					: Number(message.issueNumber);
+				if (Number.isFinite(issueNumber)) {
+					setIssueAssessmentPending(issueNumber, false);
+				}
+				if (issueNumber === selectedIssueNumber) {
 					if (message.assessment) {
 						renderAssessmentResult(message.assessment);
 					} else {
@@ -752,11 +764,19 @@
 					}
 				}
 				break;
-			case 'assessment.error':
-				if (message.issueNumber === selectedIssueNumber) {
+			}
+			case 'assessment.error': {
+				const issueNumber = typeof message.issueNumber === 'number'
+					? message.issueNumber
+					: Number(message.issueNumber);
+				if (Number.isFinite(issueNumber)) {
+					setIssueAssessmentPending(issueNumber, false);
+				}
+				if (issueNumber === selectedIssueNumber) {
 					renderAssessmentError(typeof message.message === 'string' ? message.message : 'Unable to load assessment.');
 				}
 				break;
+			}
 			case 'assessment.history':
 				if (message.issueNumber === selectedIssueNumber) {
 					assessmentHistory = Array.isArray(message.history) ? message.history : [];
@@ -774,6 +794,9 @@
 				break;
 			case 'assessment.bulkComplete':
 				bulkAssessmentPending = false;
+				Array.from(pendingAssessments).forEach(issueNumber => {
+					setIssueAssessmentPending(issueNumber, false);
+				});
 				refreshRunAnalysisControls();
 				break;
 			case 'ml.keywordStats':
@@ -1136,6 +1159,75 @@
 		}
 	}
 
+	/**
+	 * @param {number} issueNumber
+	 */
+	function updateIssueRunButton(issueNumber) {
+		if (!Number.isFinite(issueNumber)) {
+			return;
+		}
+		const card = issueList.querySelector('.issue-card[data-issue-number="' + issueNumber + '"]');
+		if (!(card instanceof HTMLElement)) {
+			return;
+		}
+		const actionContainer = card.querySelector('.issue-action-row');
+		if (!(actionContainer instanceof HTMLElement)) {
+			return;
+		}
+		const runButton = actionContainer.querySelector('button[data-action="runAssessment"]');
+		if (!(runButton instanceof HTMLButtonElement)) {
+			return;
+		}
+		const isPending = pendingAssessments.has(issueNumber);
+		runButton.disabled = isPending;
+		runButton.setAttribute('aria-disabled', isPending ? 'true' : 'false');
+		runButton.textContent = isPending ? 'Running…' : 'Run Assessment';
+		if (isPending) {
+			runButton.dataset.pending = 'true';
+		} else {
+			delete runButton.dataset.pending;
+		}
+		let status = actionContainer.querySelector('.issue-action-status');
+		if (isPending) {
+			if (!(status instanceof HTMLElement)) {
+				status = document.createElement('span');
+				status.className = 'issue-action-status';
+				status.setAttribute('role', 'status');
+				status.setAttribute('aria-live', 'polite');
+				actionContainer.appendChild(status);
+			}
+			status.textContent = 'Assessment running…';
+		} else if (status instanceof HTMLElement) {
+			status.remove();
+		}
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 * @param {boolean} pending
+	 */
+	function setIssueAssessmentPending(issueNumber, pending) {
+		if (!Number.isFinite(issueNumber)) {
+			return;
+		}
+		if (pending) {
+			pendingAssessments.add(issueNumber);
+		} else {
+			pendingAssessments.delete(issueNumber);
+		}
+		updateIssueRunButton(issueNumber);
+	}
+
+	/**
+	 * @param {number} issueNumber
+	 */
+	function copyIssueForAiAgent(issueNumber) {
+		if (!Number.isFinite(issueNumber)) {
+			return;
+		}
+		vscodeApi.postMessage({ type: 'webview.copyIssueForAI', issueNumber });
+	}
+
 	issueList.addEventListener('click', event => {
 		if (!(event.target instanceof HTMLElement)) {
 			return;
@@ -1145,11 +1237,31 @@
 			const action = actionButton.getAttribute('data-action');
 			const issueAttr = actionButton.getAttribute('data-issue-number');
 			const issueNumber = Number(issueAttr);
-			if (action === 'runAssessment' && Number.isFinite(issueNumber)) {
+			if (!Number.isFinite(issueNumber)) {
+				return;
+			}
+			if (action === 'runAssessment') {
 				event.preventDefault();
 				event.stopPropagation();
+				setIssueAssessmentPending(issueNumber, true);
 				selectIssue(issueNumber, false);
 				vscodeApi.postMessage({ type: 'webview.runAssessment', issueNumber });
+			} else if (action === 'copyForAgent') {
+				event.preventDefault();
+				event.stopPropagation();
+				copyIssueForAiAgent(issueNumber);
+			} else if (action === 'analyzeRisk') {
+				event.preventDefault();
+				event.stopPropagation();
+				vscodeApi.postMessage({ type: 'webview.analyzeRiskSignals', issueNumber });
+			} else if (action === 'openInGitHub') {
+				event.preventDefault();
+				event.stopPropagation();
+				const urlAttr = actionButton.getAttribute('data-url');
+				const url = typeof urlAttr === 'string' && urlAttr.length > 0 ? urlAttr : getIssueUrl(issueNumber);
+				if (url) {
+					vscodeApi.postMessage({ type: 'webview.openIssue', url });
+				}
 			}
 			return;
 		}
@@ -1347,6 +1459,7 @@
 			});
 		} else if (action === 'rerunAssessment') {
 			if (typeof selectedIssueNumber === 'number') {
+				setIssueAssessmentPending(selectedIssueNumber, true);
 				vscodeApi.postMessage({ type: 'webview.runAssessment', issueNumber: selectedIssueNumber });
 			}
 		}
@@ -1518,12 +1631,12 @@
 		}
 		const target = /** @type {HTMLSelectElement} */ (event.target);
 		if (target.id === 'unlinkedPrLimit') {
-			unlinkedPrLimit = Number(target.value) || 50;
+			unlinkedPrLimit = Number(target.value) || 25;
 			if (latestState) {
 				renderBackfillPanel(latestState);
 			}
 		} else if (target.id === 'unlinkedCommitLimit') {
-			unlinkedCommitLimit = Number(target.value) || 50;
+			unlinkedCommitLimit = Number(target.value) || 25;
 			if (latestState) {
 				renderBackfillPanel(latestState);
 			}
@@ -2448,7 +2561,7 @@
 	 * @returns {string}
 	 */
 	function renderUnlinkedFilters(totalPrs, totalCommits, filteredPrs, filteredCommits) {
-		const limitOptions = [5, 10, 20, 30, 40, 50];
+		const limitOptions = [5, 10, 25, 30, 40, 50];
 		const prLimitSelect = '<select id="unlinkedPrLimit" aria-label="Pull request limit">' +
 			limitOptions.map(limit => '<option value="' + limit + '"' + (limit === unlinkedPrLimit ? ' selected' : '') + '>Last ' + limit + '</option>').join('') +
 		'</select>';
@@ -2490,6 +2603,16 @@
 		}
 		
 		let filtered = items.slice();
+
+		filtered.sort((a, b) => {
+			const aDate = a?.updatedAt || a?.committedDate || a?.createdAt;
+			const bDate = b?.updatedAt || b?.committedDate || b?.createdAt;
+			const aTime = aDate ? new Date(aDate).getTime() : 0;
+			const bTime = bDate ? new Date(bDate).getTime() : 0;
+			const safeATime = Number.isFinite(aTime) ? aTime : 0;
+			const safeBTime = Number.isFinite(bTime) ? bTime : 0;
+			return safeBTime - safeATime;
+		});
 		
 		// Apply date filter if not 'all'
 		if (dateFilter !== 'all') {
@@ -2677,16 +2800,91 @@
 		const cardId = 'issue-card-' + issue.number;
 		const titleId = 'issue-title-' + issue.number;
 		const summaryId = 'issue-summary-' + issue.number;
-		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3 id="' + titleId + '">#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + badgeHtml + '<button type="button" class="issue-action" data-action="runAssessment" data-issue-number="' + issue.number + '">Run Assessment</button></div></div>';
+		const pending = pendingAssessments.has(issue.number);
+		let actionButtonsHtml = '';
+		let statusHtml = '';
+		if (currentTab === 'closed') {
+			const riskPending = riskSummary && riskSummary.status === 'pending';
+			const riskStale = Boolean(riskSummary && riskSummary.stale);
+			const riskError = riskSummary && riskSummary.status === 'error' && typeof riskSummary.message === 'string' && riskSummary.message.length > 0;
+			let riskTitle = 'Analyze historical risk signals for this closed issue.';
+			if (riskPending) {
+				riskTitle = 'Collecting historical risk signals…';
+			} else if (riskStale) {
+				riskTitle = 'Refresh stale risk insights for this issue.';
+			} else if (riskError) {
+				riskTitle = 'Retry risk analysis (last attempt failed).';
+			}
+			const analyzeAttributes = [
+				'type="button"',
+				'class="issue-action"',
+				'data-action="analyzeRisk"',
+				'data-issue-number="' + issue.number + '"',
+				'title="' + escapeHtml(riskTitle) + '"'
+			];
+			if (riskPending) {
+				analyzeAttributes.push('disabled');
+				analyzeAttributes.push('aria-disabled="true"');
+				analyzeAttributes.push('data-pending="true"');
+			} else {
+				analyzeAttributes.push('aria-disabled="false"');
+			}
+			const analyzeLabel = riskPending ? 'Analyzing…' : (riskStale ? 'Refresh Risk Signals' : 'Analyze Risk Signals');
+			const analyzeButtonHtml = '<button ' + analyzeAttributes.join(' ') + '>' + analyzeLabel + '</button>';
+			const issueUrl = typeof issue.url === 'string' ? issue.url : '';
+			const githubAttributes = [
+				'type="button"',
+				'class="issue-action"',
+				'data-action="openInGitHub"',
+				'data-issue-number="' + issue.number + '"'
+			];
+			if (issueUrl) {
+				githubAttributes.push('data-url="' + escapeHtml(issueUrl) + '"');
+			}
+			githubAttributes.push('title="Open #' + issue.number + ' in GitHub"');
+			const openButtonHtml = '<button ' + githubAttributes.join(' ') + '>Open in GitHub</button>';
+			actionButtonsHtml = analyzeButtonHtml + openButtonHtml;
+			if (riskPending) {
+				statusHtml = '<span class="issue-action-status" role="status" aria-live="polite">Collecting historical risk signals…</span>';
+			} else if (riskError && riskSummary && riskSummary.message) {
+				statusHtml = '<span class="issue-action-status" role="status" aria-live="polite">Last attempt failed: ' + escapeHtml(riskSummary.message) + '</span>';
+			}
+		} else {
+			const runButtonAttributes = [
+				'type="button"',
+				'class="issue-action"',
+				'data-action="runAssessment"',
+				'data-issue-number="' + issue.number + '"'
+			];
+			if (pending) {
+				runButtonAttributes.push('disabled');
+				runButtonAttributes.push('aria-disabled="true"');
+				runButtonAttributes.push('data-pending="true"');
+			} else {
+				runButtonAttributes.push('aria-disabled="false"');
+			}
+			const runButtonHtml = '<button ' + runButtonAttributes.join(' ') + '>' + (pending ? 'Running…' : 'Run Assessment') + '</button>';
+			actionButtonsHtml = runButtonHtml + '<button type="button" class="issue-action" data-action="copyForAgent" data-issue-number="' + issue.number + '">Copy for AI Coding Agent</button>';
+			statusHtml = pending ? '<span class="issue-action-status" role="status" aria-live="polite">Assessment running…</span>' : '';
+		}
+		const header = '<div class="issue-card-header"><div class="issue-card-title"><h3 id="' + titleId + '">#' + issue.number + ' · ' + escapeHtml(issue.title) + '</h3></div><div class="issue-card-actions">' + badgeHtml + '</div></div>';
 		const labelRow = labelBadges ? '<div class="meta-row">' + labelBadges + '</div>' : '';
-		return '<article class="issue-card ' + stateClass + '" id="' + cardId + '" data-issue-number="' + issue.number + '" data-url="' + issue.url + '" role="option" aria-selected="false" tabindex="-1" aria-labelledby="' + titleId + '" aria-describedby="' + summaryId + '">' +
-			header +
-			'<div class="meta-row" id="' + summaryId + '">' +
-				'<span>Updated ' + updatedText + '</span>' +
+		const detailsRow =
+			'<div class="meta-row issue-meta" id="' + summaryId + '">' +
+				'<span class="issue-updated">Updated ' + updatedText + '</span>' +
 				(assigneeText ? '<span>' + assigneeText + '</span>' : '') +
 				(milestoneText ? '<span>' + milestoneText + '</span>' : '') +
 				(assessedText ? '<span>' + assessedText + '</span>' : '') +
-			'</div>' +
+			'</div>';
+		const actionRow =
+			'<div class="issue-action-row">' +
+				actionButtonsHtml +
+				statusHtml +
+			'</div>';
+		return '<article class="issue-card ' + stateClass + '" id="' + cardId + '" data-issue-number="' + issue.number + '" data-url="' + issue.url + '" role="option" aria-selected="false" tabindex="-1" aria-labelledby="' + titleId + '" aria-describedby="' + summaryId + '">' +
+			header +
+			actionRow +
+			detailsRow +
 			labelRow +
 		'</article>';
 	}
@@ -2833,6 +3031,7 @@
 
 	/**
 	 * @param {any} score
+	 * @param {string | undefined} keyOverride
 	 */
 	function getReadiness(score, keyOverride) {
 		const numericScore = typeof score === 'number' && Number.isFinite(score) ? score : 0;

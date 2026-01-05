@@ -171,7 +171,12 @@ export class UsageTapService implements vscode.Disposable {
 		};
 
 		this.debug('runWithUsage starting UsageTap call', { feature: options.feature, tags: beginRequest.tags, idempotency: beginRequest.idempotency });
-		return client.withUsage(beginRequest, async (context: WithUsageContext) => {
+		let handlerInvoked = false;
+		let handlerCompleted = false;
+		let handlerResult: T | undefined;
+		try {
+			return await client.withUsage(beginRequest, async (context: WithUsageContext) => {
+				handlerInvoked = true;
 			// Check if standard calls are allowed when limit enforcement is requested
 			if (options.enforceStandardLimit) {
 				const allowed = context.begin?.data?.allowed;
@@ -200,6 +205,8 @@ export class UsageTapService implements vscode.Disposable {
 			try {
 				this.debug('Executing wrapped handler', { feature: options.feature });
 				const result = await handler(hooks);
+				handlerResult = result;
+				handlerCompleted = true;
 				this.debug('Wrapped handler completed', { feature: options.feature });
 				return result;
 			} catch (error) {
@@ -211,7 +218,40 @@ export class UsageTapService implements vscode.Disposable {
 				this.debug('Wrapped handler re-throwing error', { feature: options.feature, error: error instanceof Error ? error.message : String(error) });
 				throw error;
 			}
-		}, options.withUsageOptions);
+			}, options.withUsageOptions);
+		} catch (error) {
+			if (error instanceof UsageLimitExceededError) {
+				throw error;
+			}
+			if (UsageTapService.isUsageTapError(error)) {
+				const serialized = UsageTapService.serializeError('withUsage', error);
+				this.debug('UsageTap withUsage failed', {
+					feature: options.feature,
+					handlerInvoked,
+					handlerCompleted,
+					serialized
+				});
+				const telemetryProperties: Record<string, string> = {
+					feature: options.feature,
+					handlerInvoked: String(handlerInvoked),
+					handlerCompleted: String(handlerCompleted),
+					message: typeof serialized.message === 'string'
+						? serialized.message
+						: (error instanceof Error ? error.message : String(error))
+				};
+				if (typeof serialized.code === 'string') {
+					telemetryProperties.code = serialized.code;
+				}
+				this.telemetry.trackEvent('usagetap.withUsageFailed', telemetryProperties);
+				if (handlerCompleted) {
+					return handlerResult as T;
+				}
+				if (!handlerInvoked) {
+					return handler(UsageTapService.noopHooks);
+				}
+			}
+			throw error;
+		}
 	}
 
 	public resolveRequestedEntitlements(model: string, extras?: Partial<RequestedEntitlements>): RequestedEntitlements | undefined {
@@ -450,6 +490,14 @@ export class UsageTapService implements vscode.Disposable {
 		}
 		const segment = () => Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
 		return `${Date.now().toString(16)}-${segment()}${segment()}`;
+	}
+
+	private static isUsageTapError(error: unknown): error is { code?: string } {
+		if (!error || typeof error !== 'object') {
+			return false;
+		}
+		const candidate = error as { code?: unknown };
+		return typeof candidate.code === 'string' && candidate.code.toUpperCase().startsWith('USAGETAP');
 	}
 
 	private static readonly noopHooks: UsageTapOperationHooks = {

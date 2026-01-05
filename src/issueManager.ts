@@ -164,6 +164,7 @@ const WORKSPACE_REPOSITORY_KEY = 'issuetriage.repository.selected';
 const WORKSPACE_FILTER_KEY = 'issuetriage.repository.filters';
 const WORKSPACE_RESOLVED_UNLINKED_KEY = 'issuetriage.unlinked.resolved';
 const WORKSPACE_QUESTION_RESPONSES_KEY = 'issuetriage.assessment.questionResponses';
+const WORKSPACE_RISK_PROMPT_KEY = 'issuetriage.risk.promptedClosedHydration';
 const DEFAULT_FILTERS: FilterState = {
 	state: 'open',
 	readiness: 'all'
@@ -198,6 +199,7 @@ export class IssueManager implements vscode.Disposable {
 	private disposables: vscode.Disposable[] = [];
 	private resolvedUnlinked: ResolvedUnlinkedState = {};
 	private questionResponsesStore: StoredQuestionResponses = {};
+	private riskPrompted: Record<string, boolean> = {};
 
 	constructor(
 		private readonly auth: GitHubAuthService,
@@ -214,6 +216,7 @@ export class IssueManager implements vscode.Disposable {
 		this.disposables.push(riskSubscription);
 		this.resolvedUnlinked = this.stateService.getWorkspace<ResolvedUnlinkedState>(WORKSPACE_RESOLVED_UNLINKED_KEY, {}) ?? {};
 		this.questionResponsesStore = this.stateService.getWorkspace<StoredQuestionResponses>(WORKSPACE_QUESTION_RESPONSES_KEY, {}) ?? {};
+		this.riskPrompted = this.stateService.getWorkspace<Record<string, boolean>>(WORKSPACE_RISK_PROMPT_KEY, {}) ?? {};
 	}
 
 	public readonly onDidChangeState = this.emitter.event;
@@ -330,6 +333,23 @@ export class IssueManager implements vscode.Disposable {
 				state: filters.state
 			}, forceRefresh);
 			this.allIssues = issues;
+			try {
+				const missingAssessments = await this.assessment.getUnhydratedIssues(fullName, this.allIssues, 50);
+				if (missingAssessments.length) {
+					await vscode.window.withProgress({
+						location: vscode.ProgressLocation.Notification,
+						title: 'Loading history from GitHub'
+					}, async () => {
+						await this.assessment.hydrateAssessmentsFromGitHub(fullName, missingAssessments);
+					});
+				}
+			} catch (hydrateError) {
+				const message = hydrateError instanceof Error ? hydrateError.message : String(hydrateError);
+				this.telemetry.trackEvent('issueManager.assessments.hydrateFailed', {
+					repository: fullName,
+					message
+				});
+			}
 			if (filters.state === 'closed') {
 				await this.ensureOpenIssueCache(fullName, filters, forceRefresh);
 			} else {
@@ -337,6 +357,7 @@ export class IssueManager implements vscode.Disposable {
 			}
 			await this.updateAssessmentData(fullName);
 			this.applyFilters();
+			await this.ensureRiskCoverage(fullName, filters, forceRefresh);
 			await this.updateRiskSummaries(fullName);
 			await this.refreshUnlinkedWork(forceRefresh);
 			this.state.lastUpdated = new Date().toISOString();
@@ -365,6 +386,31 @@ export class IssueManager implements vscode.Disposable {
 				message
 			});
 		}
+	}
+
+	public analyzeRiskSignals(issueNumber: number, options: { force?: boolean } = {}): { success: boolean; message?: string } {
+		const repository = this.state.selectedRepository?.fullName;
+		if (!repository) {
+			return {
+				success: false,
+				message: 'Select a repository before analyzing risk signals.'
+			};
+		}
+		const issue = this.allIssues.find(candidate => candidate.number === issueNumber);
+		if (!issue) {
+			return {
+				success: false,
+				message: `Issue #${issueNumber} is not available in the current view.`
+			};
+		}
+		const force = options.force ?? false;
+		this.telemetry.trackEvent('issueManager.risk.manualQueued', {
+			repository,
+			issue: String(issueNumber),
+			force: String(force)
+		});
+		this.risk.queueHydration(repository, [issue], { force });
+		return { success: true };
 	}
 
 	public async answerAssessmentQuestion(issueNumber: number, question: string, answer: string): Promise<{ repository: string; question: string; response: QuestionResponse; commentUrl?: string }> {
@@ -1113,6 +1159,95 @@ export class IssueManager implements vscode.Disposable {
 			this.telemetry.trackEvent('issueManager.openCache.refreshFailed', {
 				repository,
 				message
+			});
+		}
+	}
+
+	private async ensureRiskCoverage(repository: string, filters: FilterState, forceRefresh: boolean): Promise<void> {
+		try {
+			const profileCount = await this.risk.getProfileCount(repository);
+			const shouldFetchClosed = filters.state === 'closed' || profileCount === 0;
+			if (!shouldFetchClosed) {
+				return;
+			}
+			let closedIssues: IssueSummary[] = [];
+			if (filters.state === 'closed') {
+				closedIssues = this.allIssues.filter(issue => issue.state === 'closed');
+			} else {
+				try {
+					closedIssues = await this.github.listIssues(repository, { state: 'closed' }, forceRefresh);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					this.telemetry.trackEvent('issueManager.risk.closedFetchFailed', {
+						repository,
+						message
+					});
+					return;
+				}
+			}
+			if (!closedIssues.length) {
+				return;
+			}
+			const rehydrated = await this.risk.hydrateProfilesFromGitHub(repository, closedIssues, { limit: 100 });
+			if (rehydrated > 0) {
+				this.telemetry.trackEvent('issueManager.risk.closedRehydrated', {
+					repository,
+					count: String(rehydrated)
+				});
+			}
+			const missingProfiles = await this.risk.findIssuesMissingProfiles(repository, closedIssues);
+			if (!missingProfiles.length) {
+				return;
+			}
+			await this.promptForClosedRiskHydration(repository, missingProfiles);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.telemetry.trackEvent('issueManager.risk.coverageFailed', {
+				repository,
+				message
+			});
+		}
+	}
+
+	private async promptForClosedRiskHydration(repository: string, issues: IssueSummary[]): Promise<void> {
+		const closedIssues = issues.filter(issue => issue.state === 'closed');
+		if (!closedIssues.length) {
+			return;
+		}
+		const sorted = closedIssues
+			.slice()
+			.sort((a, b) => {
+				const left = Date.parse(b.updatedAt) || 0;
+				const right = Date.parse(a.updatedAt) || 0;
+				return left - right;
+			});
+		const selection = sorted.slice(0, 25);
+		if (!selection.length) {
+			return;
+		}
+		const repoKey = this.getResolvedStoreKey(repository);
+		if (this.riskPrompted[repoKey]) {
+			return;
+		}
+		this.riskPrompted[repoKey] = true;
+		await this.stateService.updateWorkspace(WORKSPACE_RISK_PROMPT_KEY, this.riskPrompted);
+		const choice = await vscode.window.showInformationMessage(
+			selection.length === 1
+				? 'Analyze the most recent closed issue to create a risk profile?'
+				: `Analyze ${selection.length} recently closed issues to populate risk profiles now?`,
+			'Analyze now',
+			'Not now'
+		);
+		if (choice === 'Analyze now') {
+			this.telemetry.trackEvent('issueManager.risk.closedPrompt.accepted', {
+				repository,
+				count: String(selection.length)
+			});
+			this.risk.queueHydration(repository, selection, { force: true });
+		} else {
+			this.telemetry.trackEvent('issueManager.risk.closedPrompt.dismissed', {
+				repository,
+				count: String(selection.length)
 			});
 		}
 	}

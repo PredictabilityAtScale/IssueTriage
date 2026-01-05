@@ -3,7 +3,7 @@
   "displayName": "IssueTriage",
   "description": "An automated issue triage for risk and readiness assessment",
   "publisher": "PredictabilityAtScale",
-  "version": "0.0.13",
+  "version": "0.1.0",
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
@@ -163,7 +163,7 @@
       "view/item/context": [
         {
           "command": "issuetriage.assessIssue",
-          "when": "view == issuetriage.issuesView && viewItem == issueNotAssessed",
+          "when": "view == issuetriage.issuesView && viewItem == issueNotAssessed && !issuetriage.assessmentInProgress",
           "group": "inline@1",
           "icon": "$(pulse)"
         },
@@ -367,7 +367,7 @@
   "dependencies": {
     "@octokit/core": "^6.1.2",
     "@octokit/plugin-paginate-rest": "^11.4.0",
-    "@usagetap/sdk": "^0.7.1",
+    "@usagetap/sdk": "^0.8.0",
     "dotenv": "^16.4.5",
     "sql.js": "^1.9.0"
   },
