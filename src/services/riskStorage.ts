@@ -269,9 +269,38 @@ export class RiskStorage implements RiskProfileStore {
 		await fs.promises.mkdir(this.storageDir, { recursive: true });
 		const SQL = await this.loadSqlModule();
 		const existing = await this.readDatabaseFile();
-		this.db = existing ? new SQL.Database(existing) : new SQL.Database();
+		if (existing) {
+			try {
+				this.db = new SQL.Database(existing);
+				// Validate the database is readable
+				this.db.run('SELECT count(*) FROM sqlite_master');
+			} catch (err) {
+				console.error('[IssueTriage] Risk database is corrupt, backing up and recreating.', err);
+				if (this.db) {
+					try { this.db.close(); } catch { /* ignore */ }
+					this.db = undefined;
+				}
+				await this.backupCorruptDatabase();
+				this.db = new SQL.Database();
+			}
+		} else {
+			this.db = new SQL.Database();
+		}
 		this.applyMigrations();
 		await this.persist();
+	}
+
+	private async backupCorruptDatabase(): Promise<void> {
+		try {
+			const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+			const backupPath = `${this.dbPath}.corrupt-${timestamp}`;
+			await fs.promises.copyFile(this.dbPath, backupPath);
+			await fs.promises.unlink(this.dbPath);
+			console.warn(`[IssueTriage] Corrupt risk DB backed up to ${backupPath}`);
+		} catch (backupErr) {
+			console.error('[IssueTriage] Failed to back up corrupt risk DB.', backupErr);
+			try { await fs.promises.unlink(this.dbPath); } catch { /* ignore */ }
+		}
 	}
 
 	private applyMigrations(): void {
