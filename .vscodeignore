@@ -15,6 +15,7 @@ vsc-extension-quickstart.md
 .env
 .env.*
 plans/**
+cloudflare-worker/**
 tmp/**
 .github/**
 .env

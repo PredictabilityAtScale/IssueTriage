@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createRequire } from 'module';
 
 import initSqlJs, { Database, SqlJsStatic, SqlValue } from 'sql.js';
+import sqlJsWasmPath from 'sql.js/dist/sql-wasm.wasm';
 import type { RiskProfile } from '../types/risk';
 
 const DATABASE_FILENAME = 'risk-profiles.db';
@@ -24,11 +24,17 @@ export class RiskStorage implements RiskProfileStore {
 	private sql: SqlJsStatic | undefined;
 	private readonly dbPath: string;
 	private initPromise: Promise<void> | undefined;
-	private readonly require = createRequire(path.join(__dirname, 'riskStorage.cjs'));
-	private wasmPath: string | undefined;
+	private readonly wasmFilePath: string;
 
 	constructor(private readonly storageDir: string) {
 		this.dbPath = path.join(storageDir, DATABASE_FILENAME);
+		const absoluteWasmPath = path.isAbsolute(sqlJsWasmPath)
+			? sqlJsWasmPath
+			: path.join(__dirname, sqlJsWasmPath);
+		this.wasmFilePath = path.normalize(absoluteWasmPath);
+		if (!fs.existsSync(this.wasmFilePath)) {
+			console.warn('[IssueTriage] sql.js wasm asset not found at', this.wasmFilePath);
+		}
 	}
 
 	public async initialize(): Promise<void> {
@@ -418,11 +424,9 @@ export class RiskStorage implements RiskProfileStore {
 		if (this.sql) {
 			return this.sql;
 		}
-		if (!this.wasmPath) {
-			this.wasmPath = this.require.resolve('sql.js/dist/sql-wasm.wasm');
-		}
+		const wasmPath = fs.existsSync(this.wasmFilePath) ? this.wasmFilePath : 'sql-wasm.wasm';
 		this.sql = await initSqlJs({
-			locateFile: () => this.wasmPath ?? 'sql-wasm.wasm'
+			locateFile: () => wasmPath
 		});
 		return this.sql;
 	}

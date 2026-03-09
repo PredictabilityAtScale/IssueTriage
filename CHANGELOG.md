@@ -2,7 +2,8 @@
 
 All notable changes to the "issuetriage" extension will be documented in this file.
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+## [0.1.3] - 2026-03-09
+- Fixed analysis and risk database corruption
 
 ## [Unreleased]
 
